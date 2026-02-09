@@ -1,0 +1,629 @@
+defmodule Liteskill.ChatTest do
+  use Liteskill.DataCase, async: false
+
+  alias Liteskill.Chat
+
+  setup do
+    {:ok, user} =
+      Liteskill.Accounts.find_or_create_from_oidc(%{
+        email: "chat-test-#{System.unique_integer([:positive])}@example.com",
+        name: "Chat Tester",
+        oidc_sub: "chat-#{System.unique_integer([:positive])}",
+        oidc_issuer: "https://test.example.com"
+      })
+
+    {:ok, other_user} =
+      Liteskill.Accounts.find_or_create_from_oidc(%{
+        email: "other-#{System.unique_integer([:positive])}@example.com",
+        name: "Other User",
+        oidc_sub: "other-#{System.unique_integer([:positive])}",
+        oidc_issuer: "https://test.example.com"
+      })
+
+    %{user: user, other_user: other_user}
+  end
+
+  describe "create_conversation/1" do
+    test "creates a conversation with explicit title", %{user: user} do
+      assert {:ok, conversation} =
+               Chat.create_conversation(%{user_id: user.id, title: "My Chat"})
+
+      assert conversation.title == "My Chat"
+      assert conversation.status == "active"
+      assert conversation.user_id == user.id
+      assert conversation.stream_id != nil
+    end
+
+    test "creates with default title", %{user: user} do
+      assert {:ok, conversation} = Chat.create_conversation(%{user_id: user.id})
+      assert conversation.title == "New Conversation"
+    end
+
+    test "accepts optional model_id and system_prompt", %{user: user} do
+      assert {:ok, conversation} =
+               Chat.create_conversation(%{
+                 user_id: user.id,
+                 model_id: "custom-model",
+                 system_prompt: "Be brief"
+               })
+
+      assert conversation.model_id == "custom-model"
+      assert conversation.system_prompt == "Be brief"
+    end
+
+    test "auto-creates owner ACL", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      acl =
+        Repo.one!(
+          from a in Liteskill.Chat.ConversationAcl,
+            where: a.conversation_id == ^conv.id and a.user_id == ^user.id
+        )
+
+      assert acl.role == "owner"
+    end
+  end
+
+  describe "send_message/3" do
+    test "adds a user message", %{user: user} do
+      {:ok, conversation} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, message} = Chat.send_message(conversation.id, user.id, "Hello!")
+
+      assert message.role == "user"
+      assert message.content == "Hello!"
+      assert message.position == 1
+    end
+
+    test "returns error for archived conversation", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.archive_conversation(conv.id, user.id)
+
+      assert {:error, :conversation_archived} = Chat.send_message(conv.id, user.id, "Hi")
+    end
+
+    test "returns not_found for another user's conversation", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.send_message(conv.id, other.id, "Hi")
+    end
+
+    test "shared user can send messages", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _acl} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      {:ok, message} = Chat.send_message(conv.id, other.id, "Hello from shared!")
+      assert message.content == "Hello from shared!"
+    end
+  end
+
+  describe "list_conversations/2" do
+    test "lists user conversations", %{user: user} do
+      {:ok, _} = Chat.create_conversation(%{user_id: user.id, title: "Chat 1"})
+      {:ok, _} = Chat.create_conversation(%{user_id: user.id, title: "Chat 2"})
+
+      conversations = Chat.list_conversations(user.id)
+      assert length(conversations) == 2
+    end
+
+    test "excludes archived conversations", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Archived"})
+      {:ok, _} = Chat.archive_conversation(conv.id, user.id)
+
+      conversations = Chat.list_conversations(user.id)
+      assert Enum.empty?(conversations)
+    end
+
+    test "supports limit and offset", %{user: user} do
+      for i <- 1..5 do
+        {:ok, _} = Chat.create_conversation(%{user_id: user.id, title: "Chat #{i}"})
+      end
+
+      assert length(Chat.list_conversations(user.id, limit: 2)) == 2
+      assert length(Chat.list_conversations(user.id, limit: 2, offset: 4)) == 1
+    end
+
+    test "does not list other user's conversations", %{user: user, other_user: other} do
+      {:ok, _} = Chat.create_conversation(%{user_id: user.id, title: "User's Chat"})
+
+      assert Chat.list_conversations(other.id) == []
+    end
+
+    test "includes shared conversations", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Shared"})
+      {:ok, _acl} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      conversations = Chat.list_conversations(other.id)
+      assert length(conversations) == 1
+      assert hd(conversations).id == conv.id
+    end
+  end
+
+  describe "get_conversation/2" do
+    test "returns conversation with messages preloaded", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Hello!")
+
+      assert {:ok, conversation} = Chat.get_conversation(conv.id, user.id)
+      assert length(conversation.messages) == 1
+    end
+
+    test "returns not_found for another user's conversation", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.get_conversation(conv.id, other.id)
+    end
+
+    test "returns not_found for nonexistent conversation", %{user: user} do
+      assert {:error, :not_found} = Chat.get_conversation(Ecto.UUID.generate(), user.id)
+    end
+
+    test "shared user can get conversation", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _acl} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      assert {:ok, conversation} = Chat.get_conversation(conv.id, other.id)
+      assert conversation.id == conv.id
+    end
+  end
+
+  describe "list_messages/3" do
+    test "returns messages ordered by position", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "First")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Second")
+
+      {:ok, messages} = Chat.list_messages(conv.id, user.id)
+      assert length(messages) == 2
+      assert Enum.at(messages, 0).content == "First"
+      assert Enum.at(messages, 1).content == "Second"
+    end
+
+    test "supports limit and offset", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "First")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Second")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Third")
+
+      {:ok, msgs1} = Chat.list_messages(conv.id, user.id, limit: 1)
+      assert length(msgs1) == 1
+
+      {:ok, msgs2} = Chat.list_messages(conv.id, user.id, limit: 2, offset: 2)
+      assert length(msgs2) == 1
+    end
+
+    test "returns not_found for another user's conversation", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.list_messages(conv.id, other.id)
+    end
+  end
+
+  describe "get_conversation_tree/2" do
+    test "returns root and descendants", %{user: user} do
+      {:ok, parent} = Chat.create_conversation(%{user_id: user.id, title: "Parent"})
+      {:ok, _} = Chat.send_message(parent.id, user.id, "Message 1")
+
+      {:ok, fork} = Chat.fork_conversation(parent.id, user.id, 1)
+
+      {:ok, tree} = Chat.get_conversation_tree(parent.id, user.id)
+      assert length(tree) == 2
+      ids = Enum.map(tree, & &1.id)
+      assert parent.id in ids
+      assert fork.id in ids
+    end
+
+    test "navigates to root from fork", %{user: user} do
+      {:ok, parent} = Chat.create_conversation(%{user_id: user.id, title: "Parent"})
+      {:ok, _} = Chat.send_message(parent.id, user.id, "Message 1")
+
+      {:ok, fork} = Chat.fork_conversation(parent.id, user.id, 1)
+
+      {:ok, tree} = Chat.get_conversation_tree(fork.id, user.id)
+      root = Enum.at(tree, 0)
+      assert root.id == parent.id
+    end
+
+    test "returns not_found for another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.get_conversation_tree(conv.id, other.id)
+    end
+  end
+
+  describe "replay_conversation/2" do
+    test "reconstructs state from events", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Replay Test"})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Hello!")
+
+      {:ok, state} = Chat.replay_conversation(conv.id, user.id)
+      assert state.status == :active
+      assert length(state.messages) == 1
+      assert state.title == "Replay Test"
+    end
+
+    test "returns not_found for another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.replay_conversation(conv.id, other.id)
+    end
+  end
+
+  describe "replay_from/3" do
+    test "reconstructs state from a specific version", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Replay From"})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "First")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Second")
+
+      {:ok, state} = Chat.replay_from(conv.id, user.id, 2)
+      assert length(state.messages) >= 1
+    end
+
+    test "returns not_found for another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.replay_from(conv.id, other.id, 1)
+    end
+  end
+
+  describe "update_title/3" do
+    test "updates the conversation title", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Old"})
+      {:ok, updated} = Chat.update_title(conv.id, user.id, "New Title")
+
+      assert updated.title == "New Title"
+    end
+
+    test "returns error for archived conversation", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.archive_conversation(conv.id, user.id)
+
+      assert {:error, :conversation_archived} = Chat.update_title(conv.id, user.id, "Nope")
+    end
+
+    test "returns not_found for another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.update_title(conv.id, other.id, "Nope")
+    end
+  end
+
+  describe "archive_conversation/2" do
+    test "archives the conversation", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, archived} = Chat.archive_conversation(conv.id, user.id)
+
+      assert archived.status == "archived"
+    end
+
+    test "returns error when already archived", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.archive_conversation(conv.id, user.id)
+
+      assert {:error, :already_archived} = Chat.archive_conversation(conv.id, user.id)
+    end
+
+    test "returns not_found for another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} = Chat.archive_conversation(conv.id, other.id)
+    end
+  end
+
+  describe "fork_conversation/3" do
+    test "creates a branch from a conversation at position 1", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Parent"})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Message 1")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Message 2")
+
+      {:ok, fork} = Chat.fork_conversation(conv.id, user.id, 1)
+
+      assert fork.parent_conversation_id == conv.id
+      assert fork.status == "active"
+
+      {:ok, fork_state} = Chat.replay_conversation(fork.id, user.id)
+      assert length(fork_state.messages) >= 1
+    end
+
+    test "forks at a later position to preserve more messages", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Parent"})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Message 1")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Message 2")
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Message 3")
+
+      {:ok, fork} = Chat.fork_conversation(conv.id, user.id, 2)
+
+      assert fork.parent_conversation_id == conv.id
+
+      {:ok, fork_state} = Chat.replay_conversation(fork.id, user.id)
+      assert length(fork_state.messages) >= 2
+    end
+
+    test "returns not_found for another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Message 1")
+
+      assert {:error, :not_found} = Chat.fork_conversation(conv.id, other.id, 1)
+    end
+  end
+
+  describe "grant_conversation_access/4" do
+    test "grants access to another user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:ok, acl} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+      assert acl.role == "member"
+      assert acl.user_id == other.id
+    end
+
+    test "grants with custom role", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:ok, acl} = Chat.grant_conversation_access(conv.id, user.id, other.id, "viewer")
+      assert acl.role == "viewer"
+    end
+
+    test "returns forbidden for non-owner", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :forbidden} =
+               Chat.grant_conversation_access(conv.id, other.id, user.id)
+    end
+
+    test "returns error for duplicate grant", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      assert {:error, %Ecto.Changeset{}} =
+               Chat.grant_conversation_access(conv.id, user.id, other.id)
+    end
+  end
+
+  describe "revoke_conversation_access/3" do
+    test "revokes access from a user", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      assert {:ok, _} = Chat.revoke_conversation_access(conv.id, user.id, other.id)
+
+      # Verify access is revoked
+      assert {:error, :not_found} = Chat.get_conversation(conv.id, other.id)
+    end
+
+    test "cannot revoke owner ACL", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      assert {:error, :cannot_revoke_owner} =
+               Chat.revoke_conversation_access(conv.id, user.id, user.id)
+    end
+
+    test "returns not_found for nonexistent ACL", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :not_found} =
+               Chat.revoke_conversation_access(conv.id, user.id, other.id)
+    end
+
+    test "returns forbidden for non-owner", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :forbidden} =
+               Chat.revoke_conversation_access(conv.id, other.id, user.id)
+    end
+  end
+
+  describe "leave_conversation/2" do
+    test "user can leave a shared conversation", %{user: user, other_user: other} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.grant_conversation_access(conv.id, user.id, other.id)
+
+      assert {:ok, _} = Chat.leave_conversation(conv.id, other.id)
+
+      # Verify access is gone
+      assert {:error, :not_found} = Chat.get_conversation(conv.id, other.id)
+    end
+
+    test "owner cannot leave", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :owner_cannot_leave} = Chat.leave_conversation(conv.id, user.id)
+    end
+
+    test "returns not_found for user without ACL", %{other_user: other} do
+      assert {:error, :not_found} =
+               Chat.leave_conversation(Ecto.UUID.generate(), other.id)
+    end
+  end
+
+  describe "grant_group_access/4" do
+    test "grants group access to conversation", %{user: user} do
+      {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:ok, acl} = Chat.grant_group_access(conv.id, user.id, group.id)
+      assert acl.group_id == group.id
+      assert acl.role == "member"
+    end
+
+    test "returns forbidden for non-owner", %{user: user, other_user: other} do
+      {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+
+      assert {:error, :forbidden} = Chat.grant_group_access(conv.id, other.id, group.id)
+    end
+
+    test "returns not_found for nonexistent conversation", %{user: user} do
+      {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
+
+      assert {:error, :not_found} =
+               Chat.grant_group_access(Ecto.UUID.generate(), user.id, group.id)
+    end
+  end
+
+  describe "tool call events" do
+    test "start_tool_call includes input in event", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Tool Test"})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Use a tool")
+
+      stream_id = conv.stream_id
+      message_id = Ecto.UUID.generate()
+
+      # Start a stream so we're in :streaming state
+      start_cmd = {:start_assistant_stream, %{message_id: message_id, model_id: "test-model"}}
+
+      {:ok, _state, events} =
+        Liteskill.Aggregate.Loader.execute(
+          Liteskill.Chat.ConversationAggregate,
+          stream_id,
+          start_cmd
+        )
+
+      Liteskill.Chat.Projector.project_events(stream_id, events)
+      Process.sleep(50)
+
+      # Now start a tool call with input
+      tool_cmd =
+        {:start_tool_call,
+         %{
+           message_id: message_id,
+           tool_use_id: "tooluse_123",
+           tool_name: "get_weather",
+           input: %{"location" => "NYC"}
+         }}
+
+      {:ok, _state, tool_events} =
+        Liteskill.Aggregate.Loader.execute(
+          Liteskill.Chat.ConversationAggregate,
+          stream_id,
+          tool_cmd
+        )
+
+      Liteskill.Chat.Projector.project_events(stream_id, tool_events)
+      Process.sleep(50)
+
+      # Verify the event has input
+      all_events = Liteskill.EventStore.Postgres.read_stream_forward(stream_id)
+      tc_event = Enum.find(all_events, &(&1.event_type == "ToolCallStarted"))
+      assert tc_event.data["input"] == %{"location" => "NYC"}
+
+      # Verify projected tool call has input
+      tc =
+        Liteskill.Repo.one!(
+          from tc in Liteskill.Chat.ToolCall,
+            where: tc.tool_use_id == "tooluse_123"
+        )
+
+      assert tc.input == %{"location" => "NYC"}
+      assert tc.status == "started"
+    end
+
+    test "complete_tool_call works in streaming state", %{user: user} do
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Tool Streaming Test"})
+      {:ok, _} = Chat.send_message(conv.id, user.id, "Use a tool")
+
+      stream_id = conv.stream_id
+      message_id = Ecto.UUID.generate()
+
+      # Start stream, start tool call, then complete tool call while still streaming
+      start_cmd = {:start_assistant_stream, %{message_id: message_id, model_id: "test-model"}}
+
+      {:ok, _state, events} =
+        Liteskill.Aggregate.Loader.execute(
+          Liteskill.Chat.ConversationAggregate,
+          stream_id,
+          start_cmd
+        )
+
+      Liteskill.Chat.Projector.project_events(stream_id, events)
+      Process.sleep(50)
+
+      tool_cmd =
+        {:start_tool_call,
+         %{
+           message_id: message_id,
+           tool_use_id: "tooluse_streaming_test",
+           tool_name: "search",
+           input: %{"query" => "test"}
+         }}
+
+      {:ok, _state, tool_events} =
+        Liteskill.Aggregate.Loader.execute(
+          Liteskill.Chat.ConversationAggregate,
+          stream_id,
+          tool_cmd
+        )
+
+      Liteskill.Chat.Projector.project_events(stream_id, tool_events)
+      Process.sleep(50)
+
+      # Complete the tool call while still in :streaming state
+      complete_tool_cmd =
+        {:complete_tool_call,
+         %{
+           message_id: message_id,
+           tool_use_id: "tooluse_streaming_test",
+           tool_name: "search",
+           input: %{"query" => "test"},
+           output: %{"content" => [%{"text" => "Found 5 results"}]},
+           duration_ms: 150
+         }}
+
+      assert {:ok, _state, _events} =
+               Liteskill.Aggregate.Loader.execute(
+                 Liteskill.Chat.ConversationAggregate,
+                 stream_id,
+                 complete_tool_cmd
+               )
+    end
+  end
+
+  describe "group-based conversation access" do
+    test "group member can access conversation via group ACL", %{user: user, other_user: other} do
+      # Create group and add other as member
+      {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
+      {:ok, _} = Liteskill.Groups.add_member(group.id, user.id, other.id)
+
+      # Create conversation and grant group access
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Team Chat"})
+      {:ok, _} = Chat.grant_group_access(conv.id, user.id, group.id)
+
+      # Other user should be able to access via group
+      assert {:ok, conversation} = Chat.get_conversation(conv.id, other.id)
+      assert conversation.id == conv.id
+    end
+
+    test "group member sees conversation in list", %{user: user, other_user: other} do
+      {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
+      {:ok, _} = Liteskill.Groups.add_member(group.id, user.id, other.id)
+
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id, title: "Team Chat"})
+      {:ok, _} = Chat.grant_group_access(conv.id, user.id, group.id)
+
+      conversations = Chat.list_conversations(other.id)
+      assert length(conversations) == 1
+      assert hd(conversations).id == conv.id
+    end
+
+    test "non-group-member cannot access conversation via group ACL",
+         %{user: user, other_user: other} do
+      {:ok, group} = Liteskill.Groups.create_group("Private Team", user.id)
+      # Don't add other as member
+
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.grant_group_access(conv.id, user.id, group.id)
+
+      assert {:error, :not_found} = Chat.get_conversation(conv.id, other.id)
+    end
+
+    test "group member can send messages via group ACL", %{user: user, other_user: other} do
+      {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
+      {:ok, _} = Liteskill.Groups.add_member(group.id, user.id, other.id)
+
+      {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
+      {:ok, _} = Chat.grant_group_access(conv.id, user.id, group.id)
+
+      {:ok, message} = Chat.send_message(conv.id, other.id, "Hello from group member!")
+      assert message.content == "Hello from group member!"
+    end
+  end
+end

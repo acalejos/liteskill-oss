@@ -1,0 +1,288 @@
+defmodule Liteskill.Chat.Projector do
+  @moduledoc """
+  GenServer that subscribes to PubSub event broadcasts and updates
+  projection tables (conversations, messages, chunks, tool_calls).
+
+  Also supports `rebuild_projections/0` to replay all events from scratch.
+  """
+
+  use GenServer
+
+  alias Liteskill.Chat.{Conversation, Message, MessageChunk, ToolCall}
+  alias Liteskill.EventStore.Event
+  alias Liteskill.Repo
+
+  import Ecto.Query
+
+  @pubsub Liteskill.PubSub
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def project_events(stream_id, events) do
+    GenServer.cast(__MODULE__, {:project_events, stream_id, events})
+  end
+
+  def rebuild_projections do
+    GenServer.call(__MODULE__, :rebuild, :infinity)
+  end
+
+  @impl true
+  def init(_opts) do
+    Phoenix.PubSub.subscribe(@pubsub, "event_store:*")
+    {:ok, %{}}
+  end
+
+  # coveralls-ignore-start - PubSub broadcast handler, functionally identical to handle_cast
+  @impl true
+  def handle_info({:events, stream_id, events}, state) do
+    do_project(stream_id, events)
+    {:noreply, state}
+  end
+
+  # coveralls-ignore-stop
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def handle_cast({:project_events, stream_id, events}, state) do
+    do_project(stream_id, events)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:rebuild, _from, state) do
+    result = do_rebuild()
+    {:reply, result, state}
+  end
+
+  # --- Projection Logic ---
+
+  defp do_project(_stream_id, events) do
+    Enum.each(events, &project_event/1)
+  end
+
+  defp project_event(%Event{event_type: "ConversationCreated", data: data, stream_id: stream_id}) do
+    %Conversation{}
+    |> Conversation.changeset(%{
+      id: data["conversation_id"],
+      stream_id: stream_id,
+      user_id: data["user_id"],
+      title: data["title"],
+      model_id: data["model_id"],
+      system_prompt: data["system_prompt"],
+      status: "active"
+    })
+    |> Repo.insert!(on_conflict: :nothing)
+  end
+
+  defp project_event(%Event{
+         event_type: "UserMessageAdded",
+         data: data,
+         stream_id: stream_id,
+         stream_version: version
+       }) do
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    message_count = conversation.message_count + 1
+
+    %Message{}
+    |> Message.changeset(%{
+      id: data["message_id"],
+      conversation_id: conversation.id,
+      role: "user",
+      content: data["content"],
+      status: "complete",
+      position: message_count,
+      stream_version: version
+    })
+    |> Repo.insert!(on_conflict: :nothing)
+
+    conversation
+    |> Conversation.changeset(%{
+      message_count: message_count,
+      last_message_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+    |> Repo.update!()
+  end
+
+  defp project_event(%Event{
+         event_type: "AssistantStreamStarted",
+         data: data,
+         stream_id: stream_id,
+         stream_version: version
+       }) do
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    message_count = conversation.message_count + 1
+
+    %Message{}
+    |> Message.changeset(%{
+      id: data["message_id"],
+      conversation_id: conversation.id,
+      role: "assistant",
+      content: "",
+      status: "streaming",
+      model_id: data["model_id"],
+      position: message_count,
+      stream_version: version
+    })
+    |> Repo.insert!(on_conflict: :nothing)
+
+    conversation
+    |> Conversation.changeset(%{
+      message_count: message_count,
+      status: "streaming"
+    })
+    |> Repo.update!()
+  end
+
+  defp project_event(%Event{event_type: "AssistantChunkReceived", data: data}) do
+    message = Repo.get!(Message, data["message_id"])
+
+    %MessageChunk{}
+    |> MessageChunk.changeset(%{
+      message_id: message.id,
+      chunk_index: data["chunk_index"],
+      content_block_index: data["content_block_index"] || 0,
+      delta_type: data["delta_type"] || "text_delta",
+      delta_text: data["delta_text"]
+    })
+    |> Repo.insert!()
+  end
+
+  defp project_event(%Event{
+         event_type: "AssistantStreamCompleted",
+         data: data,
+         stream_id: stream_id
+       }) do
+    message = Repo.get!(Message, data["message_id"])
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    input_tokens = data["input_tokens"]
+    output_tokens = data["output_tokens"]
+
+    total_tokens =
+      if input_tokens && output_tokens, do: input_tokens + output_tokens, else: nil
+
+    message
+    |> Message.changeset(%{
+      content: data["full_content"],
+      status: "complete",
+      stop_reason: data["stop_reason"],
+      input_tokens: input_tokens,
+      output_tokens: output_tokens,
+      total_tokens: total_tokens,
+      latency_ms: data["latency_ms"]
+    })
+    |> Repo.update!()
+
+    conversation
+    |> Conversation.changeset(%{
+      status: "active",
+      last_message_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+    |> Repo.update!()
+  end
+
+  defp project_event(%Event{
+         event_type: "AssistantStreamFailed",
+         data: data,
+         stream_id: stream_id
+       }) do
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    conversation
+    |> Conversation.changeset(%{status: "active"})
+    |> Repo.update!()
+
+    # Mark the streaming message as failed
+    if data["message_id"] do
+      case Repo.get(Message, data["message_id"]) do
+        %Message{status: "streaming"} = msg ->
+          msg
+          |> Message.changeset(%{status: "failed", stop_reason: "error"})
+          |> Repo.update!()
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
+  defp project_event(%Event{event_type: "ToolCallStarted", data: data}) do
+    %ToolCall{}
+    |> ToolCall.changeset(%{
+      message_id: data["message_id"],
+      tool_use_id: data["tool_use_id"],
+      tool_name: data["tool_name"],
+      input: data["input"],
+      status: "started"
+    })
+    |> Repo.insert!()
+  end
+
+  defp project_event(%Event{event_type: "ToolCallCompleted", data: data}) do
+    tool_call =
+      Repo.one!(from tc in ToolCall, where: tc.tool_use_id == ^data["tool_use_id"])
+
+    tool_call
+    |> ToolCall.changeset(%{
+      input: data["input"],
+      output: data["output"],
+      status: "completed",
+      duration_ms: data["duration_ms"]
+    })
+    |> Repo.update!()
+  end
+
+  defp project_event(%Event{event_type: "ConversationForked", data: data, stream_id: stream_id}) do
+    parent =
+      Repo.one(from c in Conversation, where: c.stream_id == ^data["parent_stream_id"])
+
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    conversation
+    |> Conversation.changeset(%{
+      parent_conversation_id: parent && parent.id,
+      fork_at_version: data["fork_at_version"]
+    })
+    |> Repo.update!()
+  end
+
+  defp project_event(%Event{
+         event_type: "ConversationTitleUpdated",
+         data: data,
+         stream_id: stream_id
+       }) do
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    conversation
+    |> Conversation.changeset(%{title: data["title"]})
+    |> Repo.update!()
+  end
+
+  defp project_event(%Event{event_type: "ConversationArchived", stream_id: stream_id}) do
+    conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
+
+    conversation
+    |> Conversation.changeset(%{status: "archived"})
+    |> Repo.update!()
+  end
+
+  defp project_event(_event), do: :ok
+
+  defp do_rebuild do
+    Repo.transaction(fn ->
+      Repo.delete_all(MessageChunk)
+      Repo.delete_all(ToolCall)
+      Repo.delete_all(Message)
+      Repo.delete_all(Conversation)
+
+      Event
+      |> order_by([e], asc: e.inserted_at, asc: e.stream_version)
+      |> Repo.all()
+      |> Enum.each(&project_event/1)
+    end)
+  end
+end

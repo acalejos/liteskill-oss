@@ -1,0 +1,96 @@
+defmodule LiteskillWeb.Plugs.AuthTest do
+  use LiteskillWeb.ConnCase, async: true
+
+  alias LiteskillWeb.Plugs.Auth
+
+  describe "init/1" do
+    test "returns the action passed" do
+      assert Auth.init(:fetch_current_user) == :fetch_current_user
+      assert Auth.init(:require_authenticated_user) == :require_authenticated_user
+    end
+  end
+
+  describe "call/2 dispatches to the correct function" do
+    test "dispatches :fetch_current_user", %{conn: conn} do
+      conn =
+        conn
+        |> init_test_session(%{})
+        |> Auth.call(:fetch_current_user)
+
+      assert conn.assigns[:current_user] == nil
+    end
+
+    test "dispatches :require_authenticated_user", %{conn: conn} do
+      conn =
+        conn
+        |> init_test_session(%{})
+        |> assign(:current_user, nil)
+        |> put_req_header("accept", "application/json")
+        |> Auth.call(:require_authenticated_user)
+
+      assert conn.halted
+      assert json_response(conn, 401)["error"] == "authentication required"
+    end
+  end
+
+  describe "fetch_current_user/2" do
+    test "assigns nil when no user_id in session", %{conn: conn} do
+      conn =
+        conn
+        |> init_test_session(%{})
+        |> Auth.fetch_current_user()
+
+      assert conn.assigns.current_user == nil
+    end
+
+    test "assigns user when user_id is in session", %{conn: conn} do
+      {:ok, user} =
+        Liteskill.Accounts.find_or_create_from_oidc(%{
+          email: "plug-test-#{System.unique_integer([:positive])}@example.com",
+          name: "Plug Test",
+          oidc_sub: "plug-#{System.unique_integer([:positive])}",
+          oidc_issuer: "https://test.example.com"
+        })
+
+      conn =
+        conn
+        |> init_test_session(%{user_id: user.id})
+        |> Auth.fetch_current_user()
+
+      assert conn.assigns.current_user.id == user.id
+    end
+
+    test "assigns nil when user_id not found in database", %{conn: conn} do
+      conn =
+        conn
+        |> init_test_session(%{user_id: Ecto.UUID.generate()})
+        |> Auth.fetch_current_user()
+
+      assert conn.assigns.current_user == nil
+    end
+  end
+
+  describe "require_authenticated_user/2" do
+    test "passes through when user is assigned", %{conn: conn} do
+      conn =
+        conn
+        |> init_test_session(%{})
+        |> assign(:current_user, %{id: "user-1"})
+        |> Auth.require_authenticated_user()
+
+      refute conn.halted
+    end
+
+    test "halts and returns 401 when no user", %{conn: conn} do
+      conn =
+        conn
+        |> init_test_session(%{})
+        |> assign(:current_user, nil)
+        |> put_req_header("accept", "application/json")
+        |> Auth.require_authenticated_user()
+
+      assert conn.halted
+      assert conn.status == 401
+    end
+  end
+end
