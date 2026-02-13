@@ -6,6 +6,7 @@ defmodule Liteskill.DataSources do
   (defined in code, like Wiki). Documents are always in the DB.
   """
 
+  alias Liteskill.Authorization
   alias Liteskill.DataSources.{Source, Document, SyncWorker}
   alias Liteskill.Repo
 
@@ -145,9 +146,11 @@ defmodule Liteskill.DataSources do
   # --- Sources ---
 
   def list_sources(user_id) do
+    accessible_ids = Authorization.accessible_entity_ids("source", user_id)
+
     db_sources =
       Source
-      |> where([s], s.user_id == ^user_id)
+      |> where([s], s.user_id == ^user_id or s.id in subquery(accessible_ids))
       |> order_by([s], asc: s.name)
       |> Repo.all()
 
@@ -172,16 +175,34 @@ defmodule Liteskill.DataSources do
 
   def get_source(id, user_id) do
     case Repo.get(Source, id) do
-      nil -> {:error, :not_found}
-      %Source{user_id: ^user_id} = source -> {:ok, source}
-      _ -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
+      %Source{user_id: ^user_id} = source ->
+        {:ok, source}
+
+      %Source{} = source ->
+        if Authorization.has_access?("source", source.id, user_id) do
+          {:ok, source}
+        else
+          {:error, :not_found}
+        end
     end
   end
 
   def create_source(attrs, user_id) do
-    %Source{}
-    |> Source.changeset(Map.put(attrs, :user_id, user_id))
-    |> Repo.insert()
+    Repo.transaction(fn ->
+      case %Source{}
+           |> Source.changeset(Map.put(attrs, :user_id, user_id))
+           |> Repo.insert() do
+        {:ok, source} ->
+          {:ok, _} = Authorization.create_owner_acl("source", source.id, user_id)
+          source
+
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
+    end)
   end
 
   def update_source("builtin:" <> _, _attrs, _user_id), do: {:error, :cannot_update_builtin}
@@ -206,8 +227,8 @@ defmodule Liteskill.DataSources do
       if Keyword.get(opts, :is_admin, false) do
         Repo.get(Source, id)
       else
-        case get_source(id, user_id) do
-          {:ok, %Source{} = s} -> s
+        case Repo.get(Source, id) do
+          %Source{user_id: ^user_id} = s -> s
           _ -> nil
         end
       end
@@ -244,7 +265,8 @@ defmodule Liteskill.DataSources do
 
     base =
       Document
-      |> where([d], d.source_ref == ^source_ref and d.user_id == ^user_id)
+      |> where([d], d.source_ref == ^source_ref)
+      |> user_or_wiki_acl_filter(source_ref, user_id)
       |> maybe_search(search)
       |> maybe_filter_parent(parent_id)
 
@@ -284,9 +306,43 @@ defmodule Liteskill.DataSources do
 
   def get_document(id, user_id) do
     case Repo.get(Document, id) do
-      nil -> {:error, :not_found}
-      %Document{user_id: ^user_id} = doc -> {:ok, doc}
-      _ -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
+      %Document{user_id: ^user_id} = doc ->
+        {:ok, doc}
+
+      %Document{source_ref: "builtin:wiki"} = doc ->
+        case get_wiki_space_role(doc.id, user_id) do
+          {:ok, _role} -> {:ok, doc}
+          _ -> {:error, :not_found}
+        end
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Returns `{:ok, doc, role}` where role is "owner" (if user_id matches),
+  or the ACL role for wiki spaces, or `:not_found`.
+  """
+  def get_document_with_role(id, user_id) do
+    case Repo.get(Document, id) do
+      nil ->
+        {:error, :not_found}
+
+      %Document{user_id: ^user_id} = doc ->
+        {:ok, doc, "owner"}
+
+      %Document{source_ref: "builtin:wiki"} = doc ->
+        case get_wiki_space_role(doc.id, user_id) do
+          {:ok, role} -> {:ok, doc, role}
+          _ -> {:error, :not_found}
+        end
+
+      _ ->
+        {:error, :not_found}
     end
   end
 
@@ -295,6 +351,23 @@ defmodule Liteskill.DataSources do
       nil -> {:error, :not_found}
       doc -> {:ok, doc}
     end
+  end
+
+  def create_document("builtin:wiki" = source_ref, attrs, user_id) do
+    result =
+      %Document{}
+      |> Document.changeset(
+        attrs
+        |> Map.put(:source_ref, source_ref)
+        |> Map.put(:user_id, user_id)
+      )
+      |> Repo.insert()
+
+    with {:ok, doc} <- result do
+      Authorization.create_owner_acl("wiki_space", doc.id, user_id)
+    end
+
+    result
   end
 
   def create_document(source_ref, attrs, user_id) do
@@ -308,16 +381,60 @@ defmodule Liteskill.DataSources do
   end
 
   def update_document(id, attrs, user_id) do
-    with {:ok, doc} <- get_document(id, user_id) do
-      doc
-      |> Document.changeset(attrs)
-      |> Repo.update()
+    case Repo.get(Document, id) do
+      nil ->
+        {:error, :not_found}
+
+      %Document{user_id: ^user_id} = doc ->
+        doc |> Document.changeset(attrs) |> Repo.update()
+
+      %Document{source_ref: "builtin:wiki"} = doc ->
+        if can_edit_wiki_doc?(doc.id, user_id) do
+          doc |> Document.changeset(attrs) |> Repo.update()
+        else
+          {:error, :not_found}
+        end
+
+      _ ->
+        {:error, :not_found}
     end
   end
 
   def delete_document(id, user_id) do
-    with {:ok, doc} <- get_document(id, user_id) do
-      Repo.delete(doc)
+    case Repo.get(Document, id) do
+      nil ->
+        {:error, :not_found}
+
+      %Document{user_id: ^user_id} = doc ->
+        Repo.delete(doc)
+
+      # Deleting a wiki space requires owner
+      %Document{source_ref: "builtin:wiki", parent_document_id: nil} = doc ->
+        case Authorization.get_role("wiki_space", doc.id, user_id) do
+          # coveralls-ignore-next-line
+          {:ok, "owner"} -> Repo.delete(doc)
+          {:ok, _} -> {:error, :forbidden}
+          _ -> {:error, :not_found}
+        end
+
+      # Deleting a wiki child page requires manager+
+      %Document{source_ref: "builtin:wiki"} = doc ->
+        case find_root_ancestor_by_id(doc.id) do
+          {:ok, %Document{id: space_id}} ->
+            case Authorization.get_role("wiki_space", space_id, user_id) do
+              {:ok, role} when role in ["manager", "owner"] -> Repo.delete(doc)
+              {:ok, _} -> {:error, :forbidden}
+              _ -> {:error, :not_found}
+            end
+
+          # coveralls-ignore-start
+          _ ->
+            {:error, :not_found}
+            # coveralls-ignore-stop
+        end
+
+      _ ->
+        {:error, :not_found}
     end
   end
 
@@ -350,20 +467,89 @@ defmodule Liteskill.DataSources do
   end
 
   def space_tree(source_ref, space_id, user_id) do
-    documents =
-      Document
-      |> where([d], d.source_ref == ^source_ref and d.user_id == ^user_id)
-      |> order_by([d], asc: d.position)
-      |> Repo.all()
+    case Repo.get(Document, space_id) do
+      nil ->
+        []
 
-    build_document_tree(documents, space_id)
+      %Document{user_id: ^user_id} ->
+        Document
+        |> where([d], d.source_ref == ^source_ref and d.user_id == ^user_id)
+        |> order_by([d], asc: d.position)
+        |> Repo.all()
+        |> build_document_tree(space_id)
+
+      %Document{source_ref: "builtin:wiki", user_id: space_owner_id} ->
+        if Authorization.has_access?("wiki_space", space_id, user_id) do
+          Document
+          |> where([d], d.source_ref == ^source_ref and d.user_id == ^space_owner_id)
+          |> order_by([d], asc: d.position)
+          |> Repo.all()
+          |> build_document_tree(space_id)
+        else
+          []
+        end
+
+      # coveralls-ignore-start
+      _ ->
+        []
+        # coveralls-ignore-stop
+    end
   end
 
   def find_root_ancestor(document_id, user_id) do
-    case get_document(document_id, user_id) do
-      {:ok, %Document{parent_document_id: nil} = doc} -> {:ok, doc}
-      {:ok, %Document{parent_document_id: parent_id}} -> find_root_ancestor(parent_id, user_id)
-      error -> error
+    case find_root_ancestor_by_id(document_id) do
+      {:ok, %Document{user_id: ^user_id} = doc} ->
+        {:ok, doc}
+
+      {:ok, %Document{source_ref: "builtin:wiki", id: space_id} = doc} ->
+        if Authorization.has_access?("wiki_space", space_id, user_id) do
+          {:ok, doc}
+        else
+          {:error, :not_found}
+        end
+
+      # coveralls-ignore-start
+      {:ok, _doc} ->
+        {:error, :not_found}
+
+      # coveralls-ignore-stop
+
+      error ->
+        error
+    end
+  end
+
+  @doc "Returns the root space ID for a wiki document."
+  def get_space_id(%Document{parent_document_id: nil, id: id}), do: id
+
+  def get_space_id(%Document{id: id}) do
+    case find_root_ancestor_by_id(id) do
+      {:ok, root} -> root.id
+      # coveralls-ignore-next-line
+      _ -> nil
+    end
+  end
+
+  def create_child_document("builtin:wiki" = source_ref, parent_id, attrs, user_id)
+      when not is_nil(parent_id) do
+    with {:ok, space} <- find_root_ancestor_by_id(parent_id) do
+      if space.user_id == user_id or
+           Authorization.can_edit?("wiki_space", space.id, user_id) do
+        doc_user_id = space.user_id
+        next_pos = next_document_position(source_ref, doc_user_id, parent_id)
+
+        %Document{}
+        |> Document.changeset(
+          attrs
+          |> Map.put(:source_ref, source_ref)
+          |> Map.put(:user_id, doc_user_id)
+          |> Map.put(:parent_document_id, parent_id)
+          |> Map.put(:position, next_pos)
+        )
+        |> Repo.insert()
+      else
+        {:error, :forbidden}
+      end
     end
   end
 
@@ -518,6 +704,47 @@ defmodule Liteskill.DataSources do
     source
     |> Source.sync_changeset(%{sync_cursor: cursor || %{}, sync_document_count: document_count})
     |> Repo.update()
+  end
+
+  defp user_or_wiki_acl_filter(query, "builtin:wiki", user_id) do
+    accessible_ids = Authorization.accessible_entity_ids("wiki_space", user_id)
+    where(query, [d], d.user_id == ^user_id or d.id in subquery(accessible_ids))
+  end
+
+  defp user_or_wiki_acl_filter(query, _source_ref, user_id) do
+    where(query, [d], d.user_id == ^user_id)
+  end
+
+  defp find_root_ancestor_by_id(id, depth \\ 0)
+  # coveralls-ignore-next-line
+  defp find_root_ancestor_by_id(_, depth) when depth > 100, do: {:error, :too_deep}
+
+  defp find_root_ancestor_by_id(id, depth) do
+    case Repo.get(Document, id) do
+      nil -> {:error, :not_found}
+      %Document{parent_document_id: nil} = doc -> {:ok, doc}
+      %Document{parent_document_id: pid} -> find_root_ancestor_by_id(pid, depth + 1)
+    end
+  end
+
+  defp get_wiki_space_role(document_id, user_id) do
+    case find_root_ancestor_by_id(document_id) do
+      {:ok, %Document{id: space_id}} -> Authorization.get_role("wiki_space", space_id, user_id)
+      # coveralls-ignore-next-line
+      _ -> {:error, :no_access}
+    end
+  end
+
+  defp can_edit_wiki_doc?(document_id, user_id) do
+    case find_root_ancestor_by_id(document_id) do
+      {:ok, %Document{id: space_id}} ->
+        Authorization.can_edit?("wiki_space", space_id, user_id)
+
+      # coveralls-ignore-start
+      _ ->
+        false
+        # coveralls-ignore-stop
+    end
   end
 
   # coveralls-ignore-next-line

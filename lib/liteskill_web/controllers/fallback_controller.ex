@@ -13,6 +13,12 @@ defmodule LiteskillWeb.FallbackController do
     |> json(%{error: "forbidden"})
   end
 
+  def call(conn, {:error, :no_access}) do
+    conn
+    |> put_status(:forbidden)
+    |> json(%{error: "forbidden"})
+  end
+
   def call(conn, {:error, %Ecto.Changeset{} = changeset}) do
     conn
     |> put_status(:unprocessable_entity)

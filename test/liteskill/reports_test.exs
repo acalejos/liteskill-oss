@@ -2,7 +2,8 @@ defmodule Liteskill.ReportsTest do
   use Liteskill.DataCase, async: true
 
   alias Liteskill.Reports
-  alias Liteskill.Reports.{Report, ReportAcl}
+  alias Liteskill.Authorization.EntityAcl
+  alias Liteskill.Reports.Report
 
   setup do
     {:ok, owner} =
@@ -30,7 +31,13 @@ defmodule Liteskill.ReportsTest do
       assert report.title == "My Report"
       assert report.user_id == owner.id
 
-      acl = Repo.one!(from(a in ReportAcl, where: a.report_id == ^report.id))
+      acl =
+        Repo.one!(
+          from(a in EntityAcl,
+            where: a.entity_type == "report" and a.entity_id == ^report.id
+          )
+        )
+
       assert acl.user_id == owner.id
       assert acl.role == "owner"
     end
@@ -269,12 +276,12 @@ defmodule Liteskill.ReportsTest do
     test "owner can grant access", %{owner: owner, other: other} do
       {:ok, report} = Reports.create_report(owner.id, "Test")
       assert {:ok, acl} = Reports.grant_access(report.id, owner.id, other.email)
-      assert acl.role == "member"
+      assert acl.role == "manager"
     end
 
     test "non-owner cannot grant access", %{owner: owner, other: other} do
       {:ok, report} = Reports.create_report(owner.id, "Test")
-      assert {:error, :forbidden} = Reports.grant_access(report.id, other.id, owner.email)
+      assert {:error, :no_access} = Reports.grant_access(report.id, other.id, owner.email)
     end
 
     test "returns error for non-existent user", %{owner: owner} do
@@ -310,7 +317,7 @@ defmodule Liteskill.ReportsTest do
 
     test "owner cannot leave", %{owner: owner} do
       {:ok, report} = Reports.create_report(owner.id, "Test")
-      assert {:error, :cannot_leave_as_owner} = Reports.leave_report(report.id, owner.id)
+      assert {:error, :owner_cannot_leave} = Reports.leave_report(report.id, owner.id)
     end
 
     test "returns not_found for non-member", %{owner: owner, other: other} do
@@ -326,9 +333,14 @@ defmodule Liteskill.ReportsTest do
 
       {:ok, report} = Reports.create_report(owner.id, "Group Shared")
 
-      %ReportAcl{}
-      |> ReportAcl.changeset(%{report_id: report.id, group_id: group.id, role: "member"})
-      |> Repo.insert!()
+      {:ok, _} =
+        Liteskill.Authorization.grant_group_access(
+          "report",
+          report.id,
+          owner.id,
+          group.id,
+          "manager"
+        )
 
       # Other user can now access via group
       assert {:ok, _} = Reports.get_report(report.id, other.id)
@@ -339,14 +351,15 @@ defmodule Liteskill.ReportsTest do
     end
   end
 
-  describe "ReportAcl changeset validation" do
+  describe "EntityAcl changeset validation" do
     test "rejects both user_id and group_id set" do
       changeset =
-        ReportAcl.changeset(%ReportAcl{}, %{
-          report_id: Ecto.UUID.generate(),
+        EntityAcl.changeset(%EntityAcl{}, %{
+          entity_type: "report",
+          entity_id: Ecto.UUID.generate(),
           user_id: Ecto.UUID.generate(),
           group_id: Ecto.UUID.generate(),
-          role: "member"
+          role: "manager"
         })
 
       assert {:error, _} = Ecto.Changeset.apply_action(changeset, :insert)
@@ -354,9 +367,10 @@ defmodule Liteskill.ReportsTest do
 
     test "rejects neither user_id nor group_id set" do
       changeset =
-        ReportAcl.changeset(%ReportAcl{}, %{
-          report_id: Ecto.UUID.generate(),
-          role: "member"
+        EntityAcl.changeset(%EntityAcl{}, %{
+          entity_type: "report",
+          entity_id: Ecto.UUID.generate(),
+          role: "manager"
         })
 
       assert {:error, _} = Ecto.Changeset.apply_action(changeset, :insert)

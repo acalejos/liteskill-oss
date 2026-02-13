@@ -74,6 +74,57 @@ defmodule Liteskill.Rag.WikiSyncWorkerTest do
       assert length(chunks) >= 1
     end
 
+    test "stores wiki_space_id in RAG document metadata", %{owner: owner} do
+      # Create a space (root doc) and a child page
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "My Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child Page", content: "Child content for RAG."},
+          owner.id
+        )
+
+      stub_embed(1)
+
+      args = %{
+        "wiki_document_id" => child.id,
+        "user_id" => owner.id,
+        "action" => "upsert",
+        "plug" => true
+      }
+
+      assert :ok = perform_job(WikiSyncWorker, args)
+
+      {:ok, rag_doc} = Rag.find_rag_document_by_wiki_id(child.id, owner.id)
+      assert rag_doc.metadata["wiki_space_id"] == space.id
+    end
+
+    test "stores wiki_space_id as self for root space doc", %{owner: owner} do
+      {:ok, space} =
+        DataSources.create_document(
+          "builtin:wiki",
+          %{title: "Root Space", content: "Root space content."},
+          owner.id
+        )
+
+      stub_embed(1)
+
+      args = %{
+        "wiki_document_id" => space.id,
+        "user_id" => owner.id,
+        "action" => "upsert",
+        "plug" => true
+      }
+
+      assert :ok = perform_job(WikiSyncWorker, args)
+
+      {:ok, rag_doc} = Rag.find_rag_document_by_wiki_id(space.id, owner.id)
+      assert rag_doc.metadata["wiki_space_id"] == space.id
+    end
+
     test "re-upsert replaces old chunks and document", %{owner: owner} do
       {:ok, wiki_doc} =
         DataSources.create_document(

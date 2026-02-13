@@ -91,7 +91,7 @@ defmodule LiteskillWeb.ConversationController do
   def grant_access(conn, %{"conversation_id" => conversation_id} = params) do
     user = conn.assigns.current_user
     grantee_user_id = params["user_id"]
-    role = Map.get(params, "role", "member")
+    role = Map.get(params, "role", "manager")
 
     case Chat.grant_conversation_access(conversation_id, user.id, grantee_user_id, role) do
       {:ok, acl} ->

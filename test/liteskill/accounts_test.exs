@@ -349,6 +349,50 @@ defmodule Liteskill.AccountsTest do
     end
   end
 
+  describe "search_users/2" do
+    test "finds users by email" do
+      {:ok, user} =
+        Accounts.find_or_create_from_oidc(unique_oidc_attrs(%{email: "findme@test.com"}))
+
+      results = Accounts.search_users("findme")
+      assert Enum.any?(results, &(&1.id == user.id))
+    end
+
+    test "finds users by name" do
+      {:ok, user} =
+        Accounts.find_or_create_from_oidc(unique_oidc_attrs(%{name: "Findable Person"}))
+
+      results = Accounts.search_users("Findable")
+      assert Enum.any?(results, &(&1.id == user.id))
+    end
+
+    test "excludes specified user IDs" do
+      {:ok, user} =
+        Accounts.find_or_create_from_oidc(
+          unique_oidc_attrs(%{email: "exclude-me@search.com", name: "ExcludeMe"})
+        )
+
+      results = Accounts.search_users("ExcludeMe", exclude: [user.id])
+      refute Enum.any?(results, &(&1.id == user.id))
+    end
+
+    test "respects limit option" do
+      for i <- 1..5 do
+        Accounts.find_or_create_from_oidc(
+          unique_oidc_attrs(%{email: "lim#{i}@searchlimit.com", name: "LimitSearch #{i}"})
+        )
+      end
+
+      results = Accounts.search_users("searchlimit", limit: 2)
+      assert length(results) <= 2
+    end
+
+    test "escapes percent in search term" do
+      results = Accounts.search_users("100%match")
+      assert is_list(results)
+    end
+  end
+
   defp unique_oidc_attrs(overrides \\ %{}) do
     unique = System.unique_integer([:positive])
 

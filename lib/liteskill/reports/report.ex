@@ -10,7 +10,6 @@ defmodule Liteskill.Reports.Report do
 
     belongs_to :user, Liteskill.Accounts.User
     has_many :sections, Liteskill.Reports.ReportSection
-    has_many :acls, Liteskill.Reports.ReportAcl
 
     timestamps(type: :utc_datetime)
   end

@@ -7,9 +7,9 @@ defmodule Liteskill.Chat do
   """
 
   alias Liteskill.Aggregate.Loader
-  alias Liteskill.Chat.{Conversation, ConversationAcl, ConversationAggregate, Message, Projector}
+  alias Liteskill.Authorization
+  alias Liteskill.Chat.{Conversation, ConversationAggregate, Message, Projector}
   alias Liteskill.EventStore.Postgres, as: Store
-  alias Liteskill.Groups.GroupMembership
   alias Liteskill.Repo
 
   import Ecto.Query
@@ -35,14 +35,8 @@ defmodule Liteskill.Chat do
         Projector.project_events(stream_id, events)
         conversation = Repo.one!(from c in Conversation, where: c.stream_id == ^stream_id)
 
-        # Auto-create owner ACL
-        %ConversationAcl{}
-        |> ConversationAcl.changeset(%{
-          conversation_id: conversation.id,
-          user_id: params.user_id,
-          role: "owner"
-        })
-        |> Repo.insert!()
+        # Auto-create owner ACL in entity_acls
+        {:ok, _} = Authorization.create_owner_acl("conversation", conversation.id, params.user_id)
 
         {:ok, conversation}
 
@@ -118,13 +112,7 @@ defmodule Liteskill.Chat do
           new_conv = Repo.one!(from c in Conversation, where: c.stream_id == ^new_stream_id)
 
           # Auto-create owner ACL for forked conversation
-          %ConversationAcl{}
-          |> ConversationAcl.changeset(%{
-            conversation_id: new_conv.id,
-            user_id: user_id,
-            role: "owner"
-          })
-          |> Repo.insert!()
+          {:ok, _} = Authorization.create_owner_acl("conversation", new_conv.id, user_id)
 
           {:ok, new_conv}
 
@@ -186,64 +174,38 @@ defmodule Liteskill.Chat do
     end
   end
 
-  # --- ACL Management ---
+  # --- ACL Management (delegates to Authorization) ---
 
   def grant_conversation_access(conversation_id, grantor_id, grantee_user_id, role \\ "member") do
-    with {:ok, _conv} <- authorize_owner(conversation_id, grantor_id) do
-      %ConversationAcl{}
-      |> ConversationAcl.changeset(%{
-        conversation_id: conversation_id,
-        user_id: grantee_user_id,
-        role: role
-      })
-      |> Repo.insert()
-    end
+    normalized_role = if role == "member", do: "manager", else: role
+
+    Authorization.grant_access(
+      "conversation",
+      conversation_id,
+      grantor_id,
+      grantee_user_id,
+      normalized_role
+    )
   end
 
   def revoke_conversation_access(conversation_id, revoker_id, target_user_id) do
-    with {:ok, _conv} <- authorize_owner(conversation_id, revoker_id) do
-      case Repo.one(
-             from a in ConversationAcl,
-               where: a.conversation_id == ^conversation_id and a.user_id == ^target_user_id
-           ) do
-        nil ->
-          {:error, :not_found}
-
-        %ConversationAcl{role: "owner"} ->
-          {:error, :cannot_revoke_owner}
-
-        acl ->
-          Repo.delete(acl)
-      end
-    end
+    Authorization.revoke_access("conversation", conversation_id, revoker_id, target_user_id)
   end
 
   def leave_conversation(conversation_id, user_id) do
-    case Repo.one(
-           from a in ConversationAcl,
-             where: a.conversation_id == ^conversation_id and a.user_id == ^user_id
-         ) do
-      nil ->
-        {:error, :not_found}
-
-      %ConversationAcl{role: "owner"} ->
-        {:error, :owner_cannot_leave}
-
-      acl ->
-        Repo.delete(acl)
-    end
+    Authorization.leave("conversation", conversation_id, user_id)
   end
 
   def grant_group_access(conversation_id, grantor_id, group_id, role \\ "member") do
-    with {:ok, _conv} <- authorize_owner(conversation_id, grantor_id) do
-      %ConversationAcl{}
-      |> ConversationAcl.changeset(%{
-        conversation_id: conversation_id,
-        group_id: group_id,
-        role: role
-      })
-      |> Repo.insert()
-    end
+    normalized_role = if role == "member", do: "manager", else: role
+
+    Authorization.grant_group_access(
+      "conversation",
+      conversation_id,
+      grantor_id,
+      group_id,
+      normalized_role
+    )
   end
 
   # --- Read API ---
@@ -473,43 +435,13 @@ defmodule Liteskill.Chat do
     end
   end
 
-  defp authorize_owner(conversation_id, user_id) do
-    case Repo.get(Conversation, conversation_id) do
-      nil ->
-        {:error, :not_found}
-
-      conv ->
-        if conv.user_id == user_id do
-          {:ok, conv}
-        else
-          {:error, :forbidden}
-        end
-    end
-  end
-
   defp accessible_conversations_query(user_id, opts) do
     search = Keyword.get(opts, :search)
-
-    direct_acl_subquery =
-      from a in ConversationAcl,
-        where: a.user_id == ^user_id,
-        select: a.conversation_id
-
-    group_acl_subquery =
-      from a in ConversationAcl,
-        join: gm in GroupMembership,
-        on: gm.group_id == a.group_id and gm.user_id == ^user_id,
-        where: not is_nil(a.group_id),
-        select: a.conversation_id
+    accessible_ids = Authorization.accessible_entity_ids("conversation", user_id)
 
     query =
       Conversation
-      |> where(
-        [c],
-        c.user_id == ^user_id or
-          c.id in subquery(direct_acl_subquery) or
-          c.id in subquery(group_acl_subquery)
-      )
+      |> where([c], c.user_id == ^user_id or c.id in subquery(accessible_ids))
       |> where([c], c.status != "archived")
 
     if search && search != "" do
@@ -522,14 +454,7 @@ defmodule Liteskill.Chat do
 
   defp has_access?(conversation, user_id) do
     conversation.user_id == user_id or
-      Repo.exists?(
-        from a in ConversationAcl,
-          left_join: gm in GroupMembership,
-          on: gm.group_id == a.group_id and gm.user_id == ^user_id,
-          where:
-            a.conversation_id == ^conversation.id and
-              (a.user_id == ^user_id or not is_nil(gm.id))
-      )
+      Authorization.has_access?("conversation", conversation.id, user_id)
   end
 
   defp default_model_id do

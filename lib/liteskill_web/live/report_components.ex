@@ -164,42 +164,52 @@ defmodule LiteskillWeb.ReportComponents do
 
   def report_card(assigns) do
     ~H"""
-    <.link
-      navigate={~p"/reports/#{@report.id}"}
-      class="card bg-base-100 border border-base-300 shadow-sm hover:border-primary/40 transition-colors cursor-pointer"
-    >
-      <div class="card-body p-4">
-        <div class="flex items-start justify-between gap-2">
-          <div class="flex-1 min-w-0">
-            <h3 class="font-semibold text-sm truncate">{@report.title}</h3>
-            <p class="text-xs text-base-content/60 mt-0.5">
-              {Calendar.strftime(@report.inserted_at, "%b %d, %Y")}
-            </p>
+    <div class="relative group">
+      <.link
+        navigate={~p"/reports/#{@report.id}"}
+        class="block card bg-base-100 border border-base-300 shadow-sm hover:border-primary/40 transition-colors cursor-pointer"
+      >
+        <div class="card-body p-4">
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+              <h3 class="font-semibold text-sm truncate">{@report.title}</h3>
+              <p class="text-xs text-base-content/60 mt-0.5">
+                {Calendar.strftime(@report.inserted_at, "%b %d, %Y")}
+              </p>
+            </div>
+            <span :if={!@owned} class="badge badge-sm badge-info">shared</span>
           </div>
-          <span :if={!@owned} class="badge badge-sm badge-info">shared</span>
         </div>
-        <div class="card-actions justify-end mt-2">
-          <button
-            :if={@owned}
-            phx-click="delete_report"
-            phx-value-id={@report.id}
-            data-confirm="Delete this report and all its sections?"
-            class="btn btn-ghost btn-xs text-error"
-          >
-            <.icon name="hero-trash-micro" class="size-4" /> Delete
-          </button>
-          <button
-            :if={!@owned}
-            phx-click="leave_report"
-            phx-value-id={@report.id}
-            data-confirm="Leave this shared report?"
-            class="btn btn-ghost btn-xs text-warning"
-          >
-            <.icon name="hero-arrow-right-start-on-rectangle-micro" class="size-4" /> Leave
-          </button>
-        </div>
+      </.link>
+      <div class="absolute bottom-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+        <button
+          phx-click="open_sharing"
+          phx-value-entity-type="report"
+          phx-value-entity-id={@report.id}
+          class="btn btn-ghost btn-xs text-base-content/40 hover:text-primary"
+        >
+          <.icon name="hero-share-micro" class="size-3.5" />
+        </button>
+        <button
+          :if={@owned}
+          phx-click="delete_report"
+          phx-value-id={@report.id}
+          data-confirm="Delete this report and all its sections?"
+          class="btn btn-ghost btn-xs text-base-content/40 hover:text-error"
+        >
+          <.icon name="hero-trash-micro" class="size-3.5" />
+        </button>
+        <button
+          :if={!@owned}
+          phx-click="leave_report"
+          phx-value-id={@report.id}
+          data-confirm="Leave this shared report?"
+          class="btn btn-ghost btn-xs text-base-content/40 hover:text-warning"
+        >
+          <.icon name="hero-arrow-right-start-on-rectangle-micro" class="size-3.5" />
+        </button>
       </div>
-    </.link>
+    </div>
     """
   end
 

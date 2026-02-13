@@ -56,8 +56,10 @@ defmodule Liteskill.ChatTest do
 
       acl =
         Repo.one!(
-          from a in Liteskill.Chat.ConversationAcl,
-            where: a.conversation_id == ^conv.id and a.user_id == ^user.id
+          from a in Liteskill.Authorization.EntityAcl,
+            where:
+              a.entity_type == "conversation" and a.entity_id == ^conv.id and
+                a.user_id == ^user.id
         )
 
       assert acl.role == "owner"
@@ -442,7 +444,7 @@ defmodule Liteskill.ChatTest do
       {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
 
       assert {:ok, acl} = Chat.grant_conversation_access(conv.id, user.id, other.id)
-      assert acl.role == "member"
+      assert acl.role == "manager"
       assert acl.user_id == other.id
     end
 
@@ -453,10 +455,10 @@ defmodule Liteskill.ChatTest do
       assert acl.role == "viewer"
     end
 
-    test "returns forbidden for non-owner", %{user: user, other_user: other} do
+    test "returns error for non-owner", %{user: user, other_user: other} do
       {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
 
-      assert {:error, :forbidden} =
+      assert {:error, :no_access} =
                Chat.grant_conversation_access(conv.id, other.id, user.id)
     end
 
@@ -495,10 +497,10 @@ defmodule Liteskill.ChatTest do
                Chat.revoke_conversation_access(conv.id, user.id, other.id)
     end
 
-    test "returns forbidden for non-owner", %{user: user, other_user: other} do
+    test "returns error for non-owner", %{user: user, other_user: other} do
       {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
 
-      assert {:error, :forbidden} =
+      assert {:error, :no_access} =
                Chat.revoke_conversation_access(conv.id, other.id, user.id)
     end
   end
@@ -533,20 +535,20 @@ defmodule Liteskill.ChatTest do
 
       assert {:ok, acl} = Chat.grant_group_access(conv.id, user.id, group.id)
       assert acl.group_id == group.id
-      assert acl.role == "member"
+      assert acl.role == "manager"
     end
 
-    test "returns forbidden for non-owner", %{user: user, other_user: other} do
+    test "returns error for non-owner", %{user: user, other_user: other} do
       {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
       {:ok, conv} = Chat.create_conversation(%{user_id: user.id})
 
-      assert {:error, :forbidden} = Chat.grant_group_access(conv.id, other.id, group.id)
+      assert {:error, :no_access} = Chat.grant_group_access(conv.id, other.id, group.id)
     end
 
-    test "returns not_found for nonexistent conversation", %{user: user} do
+    test "returns error for nonexistent conversation", %{user: user} do
       {:ok, group} = Liteskill.Groups.create_group("Team", user.id)
 
-      assert {:error, :not_found} =
+      assert {:error, :no_access} =
                Chat.grant_group_access(Ecto.UUID.generate(), user.id, group.id)
     end
   end

@@ -96,6 +96,31 @@ defmodule Liteskill.Accounts do
   end
 
   @doc """
+  Searches users by name or email. Returns up to `limit` results.
+  Optionally excludes specific user IDs.
+  """
+  def search_users(query, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 10)
+    exclude_ids = Keyword.get(opts, :exclude, [])
+    term = "%#{String.replace(query, "%", "\\%")}%"
+
+    base =
+      User
+      |> where([u], ilike(u.email, ^term) or ilike(u.name, ^term))
+      |> limit(^limit)
+      |> order_by([u], asc: u.email)
+
+    base =
+      if exclude_ids == [] do
+        base
+      else
+        where(base, [u], u.id not in ^exclude_ids)
+      end
+
+    Repo.all(base)
+  end
+
+  @doc """
   Updates a user's role. Prevents demoting the root admin.
   """
   def update_user_role(user_id, role) do

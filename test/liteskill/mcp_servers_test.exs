@@ -1,6 +1,8 @@
 defmodule Liteskill.McpServersTest do
   use Liteskill.DataCase, async: true
 
+  alias Liteskill.Authorization
+  alias Liteskill.Authorization.EntityAcl
   alias Liteskill.McpServers
   alias Liteskill.McpServers.McpServer
 
@@ -59,6 +61,25 @@ defmodule Liteskill.McpServersTest do
       assert server.global == true
     end
 
+    test "creates owner ACL", %{owner: owner} do
+      {:ok, server} =
+        McpServers.create_server(%{
+          name: "ACL Test",
+          url: "https://a.example.com",
+          user_id: owner.id
+        })
+
+      acl =
+        Liteskill.Repo.one!(
+          from(a in EntityAcl,
+            where: a.entity_type == "mcp_server" and a.entity_id == ^server.id
+          )
+        )
+
+      assert acl.user_id == owner.id
+      assert acl.role == "owner"
+    end
+
     test "fails without required name", %{owner: owner} do
       attrs = %{url: "https://mcp.example.com", user_id: owner.id}
 
@@ -114,6 +135,21 @@ defmodule Liteskill.McpServersTest do
 
       servers = McpServers.list_servers(owner.id)
       assert Enum.any?(servers, &(&1.name == "Global"))
+    end
+
+    test "includes servers shared via ACL", %{owner: owner, other: other} do
+      {:ok, server} =
+        McpServers.create_server(%{
+          name: "Shared",
+          url: "https://shared.example.com",
+          user_id: other.id
+        })
+
+      {:ok, _} =
+        Authorization.grant_access("mcp_server", server.id, other.id, owner.id, "viewer")
+
+      servers = McpServers.list_servers(owner.id)
+      assert Enum.any?(servers, &(&1.name == "Shared"))
     end
 
     test "excludes private servers from other users", %{owner: owner, other: other} do
@@ -184,6 +220,21 @@ defmodule Liteskill.McpServersTest do
         })
 
       assert {:error, :not_found} = McpServers.get_server(server.id, owner.id)
+    end
+
+    test "returns server shared via ACL", %{owner: owner, other: other} do
+      {:ok, server} =
+        McpServers.create_server(%{
+          name: "ACL Shared",
+          url: "https://acl.example.com",
+          user_id: other.id
+        })
+
+      {:ok, _} =
+        Authorization.grant_access("mcp_server", server.id, other.id, owner.id, "viewer")
+
+      assert {:ok, found} = McpServers.get_server(server.id, owner.id)
+      assert found.id == server.id
     end
 
     test "returns not_found for nonexistent id", %{owner: owner} do

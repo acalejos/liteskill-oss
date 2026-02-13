@@ -24,6 +24,54 @@ defmodule Liteskill.Rag do
     |> Repo.all()
   end
 
+  @doc """
+  Returns collections the user can access: their own collections plus
+  Wiki collections from users who share wiki spaces with them.
+  """
+  def list_accessible_collections(user_id) do
+    own = list_collections(user_id)
+    own_ids = Enum.map(own, & &1.id)
+
+    shared =
+      shared_wiki_collection_ids(user_id, own_ids)
+      |> case do
+        [] ->
+          []
+
+        ids ->
+          Collection
+          |> where([c], c.id in ^ids)
+          |> order_by([c], asc: c.name)
+          |> Repo.all()
+      end
+
+    own ++ shared
+  end
+
+  defp shared_wiki_collection_ids(user_id, exclude_ids) do
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
+    space_owner_ids =
+      from(d in Liteskill.DataSources.Document,
+        where: d.id in subquery(wiki_space_ids) and d.user_id != ^user_id,
+        select: d.user_id,
+        distinct: true
+      )
+      |> Repo.all()
+
+    case space_owner_ids do
+      [] ->
+        []
+
+      ids ->
+        from(c in Collection,
+          where: c.name == "Wiki" and c.user_id in ^ids and c.id not in ^exclude_ids,
+          select: c.id
+        )
+        |> Repo.all()
+    end
+  end
+
   def get_collection(id, user_id) do
     case Repo.get(Collection, id) do
       nil -> {:error, :not_found}
@@ -256,6 +304,50 @@ defmodule Liteskill.Rag do
     end
   end
 
+  @doc """
+  Searches a collection with ACL awareness. Works for both owned and shared
+  collections. For shared wiki collections, only returns chunks from wiki
+  spaces the user has access to.
+  """
+  def search_accessible(collection_id, query, user_id, opts \\ []) do
+    case Repo.get(Collection, collection_id) do
+      nil ->
+        {:error, :not_found}
+
+      collection ->
+        {plug_opts, rest} = Keyword.split(opts, [:plug])
+        dimensions = Keyword.get(rest, :dimensions, collection.embedding_dimensions)
+        search_limit = Keyword.get(rest, :search_limit, 50)
+        top_n = Keyword.get(rest, :top_n, 10)
+
+        case CohereClient.embed(
+               [query],
+               [{:input_type, "search_query"}, {:dimensions, dimensions}, {:user_id, user_id}] ++
+                 plug_opts
+             ) do
+          {:ok, [query_embedding]} ->
+            results =
+              vector_search_accessible(collection_id, user_id, query_embedding, search_limit)
+
+            if results == [] do
+              {:ok, []}
+            else
+              case rerank(query, results, [{:top_n, top_n}, {:user_id, user_id}] ++ plug_opts) do
+                {:ok, _} = ok ->
+                  ok
+
+                {:error, _} ->
+                  fallback = Enum.take(results, top_n)
+                  {:ok, Enum.map(fallback, fn r -> Map.put(r, :relevance_score, nil) end)}
+              end
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
   # --- Context Augmentation ---
 
   def augment_context(query, user_id, opts \\ []) do
@@ -322,29 +414,59 @@ defmodule Liteskill.Rag do
   end
 
   def find_rag_document_by_wiki_id(wiki_document_id, user_id) do
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
     case Repo.one(
            from(d in Document,
              where:
                fragment("? ->> 'wiki_document_id' = ?", d.metadata, ^wiki_document_id) and
-                 d.user_id == ^user_id
+                 (d.user_id == ^user_id or
+                    fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(
+                      wiki_space_ids
+                    ))
            )
          ) do
-      %Document{} = doc -> {:ok, doc}
-      nil -> {:error, :not_found}
+      %Document{} = doc ->
+        {:ok, doc}
+
+      nil ->
+        # Fallback for docs missing wiki_space_id metadata (pre-backfill data)
+        Repo.one(
+          from(d in Document,
+            where: fragment("? ->> 'wiki_document_id' = ?", d.metadata, ^wiki_document_id)
+          )
+        )
+        |> resolve_wiki_acl(user_id)
     end
   end
 
   def get_rag_document_for_source_doc(document_id, user_id) do
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
     case Repo.one(
            from(d in Document,
              where:
                (fragment("? ->> 'wiki_document_id' = ?", d.metadata, ^document_id) or
                   fragment("? ->> 'source_document_id' = ?", d.metadata, ^document_id)) and
-                 d.user_id == ^user_id
+                 (d.user_id == ^user_id or
+                    fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(
+                      wiki_space_ids
+                    ))
            )
          ) do
-      %Document{} = doc -> {:ok, doc}
-      nil -> {:error, :not_found}
+      %Document{} = doc ->
+        {:ok, doc}
+
+      nil ->
+        # Fallback for docs missing wiki_space_id metadata (pre-backfill data)
+        Repo.one(
+          from(d in Document,
+            where:
+              fragment("? ->> 'wiki_document_id' = ?", d.metadata, ^document_id) or
+                fragment("? ->> 'source_document_id' = ?", d.metadata, ^document_id)
+          )
+        )
+        |> resolve_wiki_acl(user_id)
     end
   end
 
@@ -390,15 +512,29 @@ defmodule Liteskill.Rag do
   end
 
   def find_rag_document_by_source_doc_id(source_document_id, user_id) do
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
     case Repo.one(
            from(d in Document,
              where:
                fragment("? ->> 'source_document_id' = ?", d.metadata, ^source_document_id) and
-                 d.user_id == ^user_id
+                 (d.user_id == ^user_id or
+                    fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(
+                      wiki_space_ids
+                    ))
            )
          ) do
-      %Document{} = doc -> {:ok, doc}
-      nil -> {:error, :not_found}
+      %Document{} = doc ->
+        {:ok, doc}
+
+      nil ->
+        # Fallback for docs missing wiki_space_id metadata (pre-backfill data)
+        Repo.one(
+          from(d in Document,
+            where: fragment("? ->> 'source_document_id' = ?", d.metadata, ^source_document_id)
+          )
+        )
+        |> resolve_wiki_acl(user_id)
     end
   end
 
@@ -436,8 +572,37 @@ defmodule Liteskill.Rag do
 
   # --- Private ---
 
+  # Fallback ACL check for RAG documents missing wiki_space_id in metadata.
+  # Resolves the wiki space via wiki_document_id, checks ACL, and backfills
+  # wiki_space_id for future queries (self-healing).
+  defp resolve_wiki_acl(nil, _user_id), do: {:error, :not_found}
+
+  defp resolve_wiki_acl(%Document{} = doc, user_id) do
+    cond do
+      doc.user_id == user_id ->
+        {:ok, doc}
+
+      is_binary(doc.metadata["wiki_document_id"]) ->
+        with %Liteskill.DataSources.Document{} = wiki_doc <-
+               Repo.get(Liteskill.DataSources.Document, doc.metadata["wiki_document_id"]),
+             space_id when is_binary(space_id) <- Liteskill.DataSources.get_space_id(wiki_doc),
+             {:ok, _role} <-
+               Liteskill.Authorization.get_role("wiki_space", space_id, user_id) do
+          new_metadata = Map.put(doc.metadata, "wiki_space_id", space_id)
+          Repo.update(Ecto.Changeset.change(doc, %{metadata: new_metadata}))
+          {:ok, %{doc | metadata: new_metadata}}
+        else
+          _ -> {:error, :not_found}
+        end
+
+      true ->
+        {:error, :not_found}
+    end
+  end
+
   defp vector_search_all(user_id, query_embedding, limit) do
     query_vector = Pgvector.new(query_embedding)
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
 
     from(c in Chunk,
       join: d in Document,
@@ -446,7 +611,32 @@ defmodule Liteskill.Rag do
       on: s.id == d.source_id,
       join: coll in Collection,
       on: coll.id == s.collection_id,
-      where: coll.user_id == ^user_id,
+      where:
+        coll.user_id == ^user_id or
+          fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(wiki_space_ids),
+      where: not is_nil(c.embedding),
+      order_by: fragment("embedding <=> ?", ^query_vector),
+      limit: ^limit,
+      select: %{chunk: c, distance: fragment("embedding <=> ?", ^query_vector)}
+    )
+    |> Repo.all()
+  end
+
+  defp vector_search_accessible(collection_id, user_id, query_embedding, limit) do
+    query_vector = Pgvector.new(query_embedding)
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
+    from(c in Chunk,
+      join: d in Document,
+      on: d.id == c.document_id,
+      join: s in Source,
+      on: s.id == d.source_id,
+      join: coll in Collection,
+      on: coll.id == s.collection_id,
+      where: s.collection_id == ^collection_id,
+      where:
+        coll.user_id == ^user_id or
+          fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(wiki_space_ids),
       where: not is_nil(c.embedding),
       order_by: fragment("embedding <=> ?", ^query_vector),
       limit: ^limit,

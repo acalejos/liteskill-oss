@@ -102,6 +102,262 @@ defmodule Liteskill.RagTest do
     end
   end
 
+  describe "list_accessible_collections/1" do
+    test "includes own collections", %{owner: owner} do
+      {:ok, _} = create_collection(owner.id, %{name: "My Coll"})
+
+      colls = Rag.list_accessible_collections(owner.id)
+      assert length(colls) == 1
+      assert hd(colls).name == "My Coll"
+    end
+
+    test "includes wiki collections from shared wiki spaces", %{owner: owner, other: other} do
+      # Owner creates a wiki space and shares it with other
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      # Owner has a Wiki collection (created by wiki sync)
+      {:ok, _wiki_coll} = Rag.find_or_create_wiki_collection(owner.id)
+
+      # Other user should see owner's Wiki collection
+      colls = Rag.list_accessible_collections(other.id)
+      wiki_names = Enum.map(colls, & &1.name)
+      assert "Wiki" in wiki_names
+    end
+
+    test "excludes wiki collections from unshared spaces", %{owner: owner, other: other} do
+      # Owner creates a wiki space but does NOT share
+      {:ok, _space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Private"}, owner.id)
+
+      {:ok, _} = Rag.find_or_create_wiki_collection(owner.id)
+
+      colls = Rag.list_accessible_collections(other.id)
+      assert colls == []
+    end
+
+    test "does not duplicate own Wiki collection", %{owner: owner} do
+      {:ok, _} = Rag.find_or_create_wiki_collection(owner.id)
+
+      colls = Rag.list_accessible_collections(owner.id)
+      wiki_count = Enum.count(colls, &(&1.name == "Wiki"))
+      assert wiki_count == 1
+    end
+  end
+
+  describe "search_accessible/4" do
+    test "returns results from owned collection", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      {:ok, doc} = create_document(source.id, owner.id)
+
+      embedding = List.duplicate(0.1, 1024)
+      agent = Agent.start_link(fn -> :embed end) |> elem(1)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        response =
+          case Agent.get_and_update(agent, fn s -> {s, :done} end) do
+            :embed ->
+              %{"embeddings" => %{"float" => [embedding]}}
+
+            :done ->
+              if Map.has_key?(decoded, "query") do
+                %{"results" => [%{"index" => 0, "relevance_score" => 0.95}]}
+              else
+                %{"embeddings" => %{"float" => [embedding]}}
+              end
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(response))
+      end)
+
+      chunks = [%{content: "owned chunk", position: 0}]
+      {:ok, _} = Rag.embed_chunks(doc.id, chunks, owner.id, plug: {Req.Test, CohereClient})
+
+      assert {:ok, results} =
+               Rag.search_accessible(coll.id, "test", owner.id,
+                 plug: {Req.Test, CohereClient},
+                 top_n: 5,
+                 search_limit: 20
+               )
+
+      assert length(results) >= 1
+    end
+
+    test "returns results from shared wiki collection", %{owner: owner, other: other} do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, coll} = Rag.find_or_create_wiki_collection(owner.id)
+      {:ok, source} = Rag.find_or_create_wiki_source(coll.id, owner.id)
+
+      {:ok, rag_doc} =
+        create_document(source.id, owner.id, %{
+          title: "Shared Page",
+          metadata: %{"wiki_document_id" => Ecto.UUID.generate(), "wiki_space_id" => space.id}
+        })
+
+      embedding = List.duplicate(0.1, 1024)
+      agent = Agent.start_link(fn -> :embed end) |> elem(1)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        response =
+          case Agent.get_and_update(agent, fn s -> {s, :done} end) do
+            :embed ->
+              %{"embeddings" => %{"float" => [embedding]}}
+
+            :done ->
+              if Map.has_key?(decoded, "query") do
+                %{"results" => [%{"index" => 0, "relevance_score" => 0.9}]}
+              else
+                %{"embeddings" => %{"float" => [embedding]}}
+              end
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(response))
+      end)
+
+      chunks = [%{content: "shared wiki chunk", position: 0}]
+      {:ok, _} = Rag.embed_chunks(rag_doc.id, chunks, owner.id, plug: {Req.Test, CohereClient})
+
+      # Other user can search owner's collection and see shared wiki chunks
+      assert {:ok, results} =
+               Rag.search_accessible(coll.id, "wiki", other.id,
+                 plug: {Req.Test, CohereClient},
+                 top_n: 5,
+                 search_limit: 20
+               )
+
+      assert length(results) >= 1
+      assert hd(results).chunk.content == "shared wiki chunk"
+    end
+
+    test "filters out chunks from non-accessible wiki spaces", %{owner: owner, other: other} do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Private"}, owner.id)
+
+      {:ok, coll} = Rag.find_or_create_wiki_collection(owner.id)
+      {:ok, source} = Rag.find_or_create_wiki_source(coll.id, owner.id)
+
+      {:ok, rag_doc} =
+        create_document(source.id, owner.id, %{
+          title: "Private Page",
+          metadata: %{"wiki_document_id" => Ecto.UUID.generate(), "wiki_space_id" => space.id}
+        })
+
+      embedding = List.duplicate(0.1, 1024)
+      agent = Agent.start_link(fn -> :embed end) |> elem(1)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        response =
+          case Agent.get_and_update(agent, fn s -> {s, :done} end) do
+            :embed -> %{"embeddings" => %{"float" => [embedding]}}
+            :done -> %{"embeddings" => %{"float" => [embedding]}}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(response))
+      end)
+
+      chunks = [%{content: "private chunk", position: 0}]
+      {:ok, _} = Rag.embed_chunks(rag_doc.id, chunks, owner.id, plug: {Req.Test, CohereClient})
+
+      # Other user cannot see chunks (no ACL)
+      assert {:ok, []} =
+               Rag.search_accessible(coll.id, "test", other.id,
+                 plug: {Req.Test, CohereClient},
+                 top_n: 5,
+                 search_limit: 20
+               )
+    end
+
+    test "falls back when rerank fails", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      {:ok, doc} = create_document(source.id, owner.id)
+
+      embedding = List.duplicate(0.1, 1024)
+      agent = Agent.start_link(fn -> 0 end) |> elem(1)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        call_num = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+
+        cond do
+          call_num == 0 ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              Jason.encode!(%{"embeddings" => %{"float" => [embedding]}})
+            )
+
+          Map.has_key?(decoded, "input_type") ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              Jason.encode!(%{"embeddings" => %{"float" => [embedding]}})
+            )
+
+          Map.has_key?(decoded, "query") ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(500, Jason.encode!(%{"message" => "rerank failed"}))
+        end
+      end)
+
+      chunks = [%{content: "fallback chunk", position: 0}]
+      {:ok, _} = Rag.embed_chunks(doc.id, chunks, owner.id, plug: {Req.Test, CohereClient})
+
+      assert {:ok, results} =
+               Rag.search_accessible(coll.id, "test", owner.id,
+                 plug: {Req.Test, CohereClient},
+                 top_n: 5,
+                 search_limit: 20
+               )
+
+      assert length(results) >= 1
+      assert Enum.all?(results, fn r -> r.relevance_score == nil end)
+    end
+
+    test "returns error on embed failure", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(500, Jason.encode!(%{"message" => "error"}))
+      end)
+
+      assert {:error, %{status: 500}} =
+               Rag.search_accessible(coll.id, "query", owner.id, plug: {Req.Test, CohereClient})
+    end
+
+    test "returns not_found for nonexistent collection", %{owner: owner} do
+      assert {:error, :not_found} =
+               Rag.search_accessible(Ecto.UUID.generate(), "q", owner.id)
+    end
+  end
+
   describe "get_collection/2" do
     test "returns own collection", %{owner: owner} do
       {:ok, coll} = create_collection(owner.id)
@@ -782,6 +1038,82 @@ defmodule Liteskill.RagTest do
 
       assert {:error, :not_found} = Rag.find_rag_document_by_wiki_id(wiki_id, other.id)
     end
+
+    test "returns doc for user with wiki space ACL", %{owner: owner, other: other} do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      wiki_id = Ecto.UUID.generate()
+
+      {:ok, doc} =
+        create_document(source.id, owner.id, %{
+          metadata: %{"wiki_document_id" => wiki_id, "wiki_space_id" => space.id}
+        })
+
+      assert {:ok, found} = Rag.find_rag_document_by_wiki_id(wiki_id, other.id)
+      assert found.id == doc.id
+    end
+
+    test "fallback resolves and backfills missing wiki_space_id", %{owner: owner, other: other} do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+
+      # RAG doc with wiki_document_id pointing to a real wiki doc in the space,
+      # but missing wiki_space_id (pre-backfill scenario)
+      {:ok, wiki_child} =
+        Liteskill.DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child Page"},
+          owner.id
+        )
+
+      {:ok, rag_doc} =
+        create_document(source.id, owner.id, %{
+          metadata: %{"wiki_document_id" => wiki_child.id}
+        })
+
+      # Other user should still find it via fallback
+      assert {:ok, found} = Rag.find_rag_document_by_wiki_id(wiki_child.id, other.id)
+      assert found.id == rag_doc.id
+      # wiki_space_id should be backfilled
+      assert found.metadata["wiki_space_id"] == space.id
+    end
+
+    test "fallback returns :not_found without ACL access", %{owner: owner, other: other} do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Private"}, owner.id)
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+
+      {:ok, wiki_child} =
+        Liteskill.DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child Page"},
+          owner.id
+        )
+
+      {:ok, _rag_doc} =
+        create_document(source.id, owner.id, %{
+          metadata: %{"wiki_document_id" => wiki_child.id}
+        })
+
+      # No ACL — should return :not_found
+      assert {:error, :not_found} = Rag.find_rag_document_by_wiki_id(wiki_child.id, other.id)
+    end
   end
 
   describe "delete_document_chunks/1" do
@@ -1032,6 +1364,110 @@ defmodule Liteskill.RagTest do
     end
   end
 
+  # --- Wiki Space ACL in vector_search_all ---
+
+  describe "augment_context with wiki space ACL" do
+    test "returns chunks from shared wiki spaces", %{owner: owner, other: other} do
+      # Owner creates a wiki space
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared Space"}, owner.id)
+
+      # Grant viewer access to other user
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      # Create RAG document with wiki_space_id metadata (simulating wiki sync)
+      {:ok, coll} = create_collection(owner.id, %{name: "Wiki"})
+      {:ok, source} = create_source(coll.id, owner.id, %{name: "wiki"})
+
+      {:ok, rag_doc} =
+        create_document(source.id, owner.id, %{
+          title: "Shared Page",
+          metadata: %{"wiki_document_id" => Ecto.UUID.generate(), "wiki_space_id" => space.id}
+        })
+
+      embedding = List.duplicate(0.1, 1024)
+
+      agent = Agent.start_link(fn -> :embed end) |> elem(1)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        response =
+          case Agent.get_and_update(agent, fn state ->
+                 case state do
+                   :embed -> {:embed, :query}
+                   :query -> {:query, :query}
+                 end
+               end) do
+            :embed -> %{"embeddings" => %{"float" => [embedding]}}
+            :query -> %{"embeddings" => %{"float" => [embedding]}}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(response))
+      end)
+
+      chunks = [%{content: "shared wiki content", position: 0}]
+
+      assert {:ok, _} =
+               Rag.embed_chunks(rag_doc.id, chunks, owner.id, plug: {Req.Test, CohereClient})
+
+      # Other user (with ACL) can see chunks via augment_context
+      assert {:ok, results} =
+               Rag.augment_context("wiki", other.id, plug: {Req.Test, CohereClient})
+
+      assert length(results) >= 1
+      assert hd(results).chunk.content == "shared wiki content"
+    end
+
+    test "does not return wiki chunks from spaces without ACL", %{owner: owner, other: other} do
+      # Owner creates a wiki space but does NOT share it
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Private Space"}, owner.id)
+
+      {:ok, coll} = create_collection(owner.id, %{name: "Wiki"})
+      {:ok, source} = create_source(coll.id, owner.id, %{name: "wiki"})
+
+      {:ok, rag_doc} =
+        create_document(source.id, owner.id, %{
+          title: "Private Page",
+          metadata: %{"wiki_document_id" => Ecto.UUID.generate(), "wiki_space_id" => space.id}
+        })
+
+      embedding = List.duplicate(0.1, 1024)
+
+      agent = Agent.start_link(fn -> :embed end) |> elem(1)
+
+      Req.Test.stub(CohereClient, fn conn ->
+        response =
+          case Agent.get_and_update(agent, fn state ->
+                 case state do
+                   :embed -> {:embed, :query}
+                   :query -> {:query, :query}
+                 end
+               end) do
+            :embed -> %{"embeddings" => %{"float" => [embedding]}}
+            :query -> %{"embeddings" => %{"float" => [embedding]}}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(response))
+      end)
+
+      chunks = [%{content: "private wiki content", position: 0}]
+
+      assert {:ok, _} =
+               Rag.embed_chunks(rag_doc.id, chunks, owner.id, plug: {Req.Test, CohereClient})
+
+      # Other user (no ACL) should NOT see chunks
+      assert {:ok, results} =
+               Rag.augment_context("wiki", other.id, plug: {Req.Test, CohereClient})
+
+      assert results == []
+    end
+  end
+
   # --- SHA256 Hashing ---
 
   describe "SHA256 content hashing" do
@@ -1144,6 +1580,124 @@ defmodule Liteskill.RagTest do
         })
 
       assert {:error, :not_found} = Rag.get_rag_document_for_source_doc(wiki_doc_id, owner.id)
+    end
+
+    test "returns doc for user with wiki space ACL via wiki_document_id", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      wiki_doc_id = Ecto.UUID.generate()
+
+      {:ok, doc} =
+        create_document(source.id, owner.id, %{
+          title: "Shared Wiki Doc",
+          metadata: %{"wiki_document_id" => wiki_doc_id, "wiki_space_id" => space.id}
+        })
+
+      assert {:ok, found} = Rag.get_rag_document_for_source_doc(wiki_doc_id, other.id)
+      assert found.id == doc.id
+    end
+
+    test "returns doc for user with wiki space ACL via source_document_id", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      source_doc_id = Ecto.UUID.generate()
+
+      {:ok, doc} =
+        create_document(source.id, owner.id, %{
+          title: "Shared Source Doc",
+          metadata: %{"source_document_id" => source_doc_id, "wiki_space_id" => space.id}
+        })
+
+      assert {:ok, found} = Rag.get_rag_document_for_source_doc(source_doc_id, other.id)
+      assert found.id == doc.id
+    end
+
+    test "fallback resolves missing wiki_space_id via wiki_document_id", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, wiki_child} =
+        Liteskill.DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child Page"},
+          owner.id
+        )
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+
+      {:ok, rag_doc} =
+        create_document(source.id, owner.id, %{
+          title: "Missing Space ID",
+          metadata: %{"wiki_document_id" => wiki_child.id}
+        })
+
+      assert {:ok, found} = Rag.get_rag_document_for_source_doc(wiki_child.id, other.id)
+      assert found.id == rag_doc.id
+      assert found.metadata["wiki_space_id"] == space.id
+    end
+  end
+
+  describe "find_rag_document_by_source_doc_id/2" do
+    test "returns doc for user with wiki space ACL", %{owner: owner, other: other} do
+      {:ok, space} =
+        Liteskill.DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _} =
+        Liteskill.Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      source_doc_id = Ecto.UUID.generate()
+
+      {:ok, doc} =
+        create_document(source.id, owner.id, %{
+          title: "Shared Doc",
+          metadata: %{"source_document_id" => source_doc_id, "wiki_space_id" => space.id}
+        })
+
+      assert {:ok, found} = Rag.find_rag_document_by_source_doc_id(source_doc_id, other.id)
+      assert found.id == doc.id
+    end
+
+    test "returns :not_found without wiki space ACL", %{owner: owner, other: other} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      source_doc_id = Ecto.UUID.generate()
+
+      {:ok, _} =
+        create_document(source.id, owner.id, %{
+          title: "Private Doc",
+          metadata: %{"source_document_id" => source_doc_id}
+        })
+
+      assert {:error, :not_found} =
+               Rag.find_rag_document_by_source_doc_id(source_doc_id, other.id)
     end
   end
 

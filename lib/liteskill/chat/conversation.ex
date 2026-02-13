@@ -22,7 +22,6 @@ defmodule Liteskill.Chat.Conversation do
     belongs_to :user, Liteskill.Accounts.User
     belongs_to :parent_conversation, __MODULE__
     has_many :messages, Liteskill.Chat.Message
-    has_many :acls, Liteskill.Chat.ConversationAcl
     has_many :branches, __MODULE__, foreign_key: :parent_conversation_id
 
     timestamps(type: :utc_datetime)

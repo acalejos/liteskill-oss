@@ -158,7 +158,7 @@ defmodule LiteskillWeb.ConversationControllerTest do
 
       assert %{"data" => acl} = json_response(conn, 201)
       assert acl["user_id"] == other.id
-      assert acl["role"] == "member"
+      assert acl["role"] == "manager"
     end
 
     test "returns forbidden for non-owner", %{user: user, other_user: other} do

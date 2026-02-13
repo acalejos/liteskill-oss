@@ -3,15 +3,18 @@ defmodule Liteskill.McpServers do
   The McpServers context. Manages MCP server registrations per user.
   """
 
+  alias Liteskill.Authorization
   alias Liteskill.McpServers.McpServer
   alias Liteskill.Repo
 
   import Ecto.Query
 
   def list_servers(user_id) do
+    accessible_ids = Authorization.accessible_entity_ids("mcp_server", user_id)
+
     db_servers =
       McpServer
-      |> where([s], s.user_id == ^user_id or s.global == true)
+      |> where([s], s.user_id == ^user_id or s.global == true or s.id in subquery(accessible_ids))
       |> order_by([s], asc: s.name)
       |> Repo.all()
 
@@ -36,15 +39,28 @@ defmodule Liteskill.McpServers do
       %McpServer{global: true} = server ->
         {:ok, server}
 
-      _ ->
-        {:error, :not_found}
+      %McpServer{} = server ->
+        if Authorization.has_access?("mcp_server", server.id, user_id) do
+          {:ok, server}
+        else
+          {:error, :not_found}
+        end
     end
   end
 
   def create_server(attrs) do
-    %McpServer{}
-    |> McpServer.changeset(attrs)
-    |> Repo.insert()
+    Repo.transaction(fn ->
+      case %McpServer{}
+           |> McpServer.changeset(attrs)
+           |> Repo.insert() do
+        {:ok, server} ->
+          {:ok, _} = Authorization.create_owner_acl("mcp_server", server.id, server.user_id)
+          server
+
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
+    end)
   end
 
   def update_server(server, user_id, attrs) do

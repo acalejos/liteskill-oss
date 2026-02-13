@@ -111,6 +111,15 @@ defmodule LiteskillWeb.SourcesComponents do
         <div class="absolute bottom-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
           <button
             :if={!@builtin?}
+            phx-click="open_sharing"
+            phx-value-entity-type="source"
+            phx-value-entity-id={@source.id}
+            class="btn btn-ghost btn-xs text-base-content/40 hover:text-primary"
+          >
+            <.icon name="hero-share-micro" class="size-3.5" />
+          </button>
+          <button
+            :if={!@builtin?}
             phx-click="open_configure_source"
             phx-value-source-id={@source.id}
             class="btn btn-ghost btn-xs text-base-content/40 hover:text-primary"
@@ -289,40 +298,35 @@ defmodule LiteskillWeb.SourcesComponents do
         </div>
 
         <div class="p-4 border-b border-base-300">
-          <%= if @collections == [] do %>
-            <p class="text-base-content/50 text-sm text-center py-4">
-              No RAG collections found. Ingest some documents first.
-            </p>
-          <% else %>
-            <form phx-submit="rag_search" class="space-y-3">
-              <div class="form-control">
-                <select
-                  name="collection_id"
-                  class="select select-bordered select-sm w-full"
-                >
-                  <option :for={coll <- @collections} value={coll.id}>
-                    {coll.name}
-                  </option>
-                </select>
-              </div>
-              <div class="flex gap-2">
-                <input
-                  type="text"
-                  name="query"
-                  placeholder="Enter search query..."
-                  class="input input-bordered input-sm flex-1"
-                  autocomplete="off"
-                />
-                <button type="submit" class="btn btn-primary btn-sm" disabled={@loading}>
-                  <%= if @loading do %>
-                    <span class="loading loading-spinner loading-xs" /> Searching...
-                  <% else %>
-                    <.icon name="hero-magnifying-glass-micro" class="size-4" /> Search
-                  <% end %>
-                </button>
-              </div>
-            </form>
-          <% end %>
+          <form phx-submit="rag_search" class="space-y-3">
+            <div class="form-control">
+              <select
+                name="collection_id"
+                class="select select-bordered select-sm w-full"
+              >
+                <option value="all">All Collections</option>
+                <option :for={coll <- @collections} value={coll.id}>
+                  {coll.name}
+                </option>
+              </select>
+            </div>
+            <div class="flex gap-2">
+              <input
+                type="text"
+                name="query"
+                placeholder="Enter search query..."
+                class="input input-bordered input-sm flex-1"
+                autocomplete="off"
+              />
+              <button type="submit" class="btn btn-primary btn-sm" disabled={@loading}>
+                <%= if @loading do %>
+                  <span class="loading loading-spinner loading-xs" /> Searching...
+                <% else %>
+                  <.icon name="hero-magnifying-glass-micro" class="size-4" /> Search
+                <% end %>
+              </button>
+            </div>
+          </form>
         </div>
 
         <div class="flex-1 overflow-y-auto p-4 space-y-3">

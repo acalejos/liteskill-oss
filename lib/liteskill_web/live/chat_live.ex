@@ -12,7 +12,7 @@ defmodule LiteskillWeb.ChatLive do
   alias LiteskillWeb.ProfileLive
   alias LiteskillWeb.{PipelineComponents, PipelineLive}
   alias LiteskillWeb.{ReportComponents, ReportsLive}
-  alias LiteskillWeb.{SourcesComponents, WikiComponents, WikiLive}
+  alias LiteskillWeb.{SharingComponents, SourcesComponents, WikiComponents, WikiLive}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -96,7 +96,16 @@ defmodule LiteskillWeb.ChatLive do
        conversations_total: 0,
        conversations_selected: MapSet.new(),
        conversations_page_size: 20,
-       confirm_bulk_delete: false
+       confirm_bulk_delete: false,
+       # Sharing modal state
+       show_sharing: false,
+       sharing_entity_type: nil,
+       sharing_entity_id: nil,
+       sharing_acls: [],
+       sharing_user_search_results: [],
+       sharing_user_search_query: "",
+       sharing_groups: [],
+       sharing_error: nil
      )
      |> assign(WikiLive.wiki_assigns())
      |> assign(ReportsLive.reports_assigns())
@@ -206,7 +215,7 @@ defmodule LiteskillWeb.ChatLive do
     user_id = socket.assigns.current_user.id
     sources = Liteskill.DataSources.list_sources_with_counts(user_id)
 
-    rag_collections = Liteskill.Rag.list_collections(user_id)
+    rag_collections = Liteskill.Rag.list_accessible_collections(user_id)
 
     socket
     |> assign(
@@ -672,6 +681,15 @@ defmodule LiteskillWeb.ChatLive do
                 >
                   <.icon name="hero-arrow-path-micro" class="size-4" /> Sync
                 </button>
+                <button
+                  phx-click="open_sharing"
+                  phx-value-entity-type="source"
+                  phx-value-entity-id={@current_source.id}
+                  class="btn btn-ghost btn-sm btn-square"
+                  title="Share"
+                >
+                  <.icon name="hero-share-micro" class="size-4" />
+                </button>
               </div>
             </div>
           </header>
@@ -822,6 +840,7 @@ defmodule LiteskillWeb.ChatLive do
               <WikiComponents.space_card
                 :for={space <- @source_documents.documents}
                 space={space}
+                space_role={Map.get(space, :space_role)}
               />
             </div>
             <p
@@ -918,10 +937,15 @@ defmodule LiteskillWeb.ChatLive do
                 </h1>
               </div>
               <div :if={!@wiki_editing} class="flex gap-1">
-                <button phx-click="edit_wiki_page" class="btn btn-ghost btn-sm gap-1">
+                <button
+                  :if={@wiki_user_role in ["editor", "manager", "owner"]}
+                  phx-click="edit_wiki_page"
+                  class="btn btn-ghost btn-sm gap-1"
+                >
                   <.icon name="hero-pencil-square-micro" class="size-4" /> Edit
                 </button>
                 <button
+                  :if={@wiki_user_role in ["editor", "manager", "owner"]}
                   phx-click="show_wiki_form"
                   phx-value-parent-id={@wiki_document.id}
                   class="btn btn-ghost btn-sm gap-1"
@@ -929,6 +953,16 @@ defmodule LiteskillWeb.ChatLive do
                   <.icon name="hero-plus-micro" class="size-4" /> Add Child
                 </button>
                 <button
+                  :if={@wiki_user_role in ["manager", "owner"] && @wiki_space}
+                  phx-click="open_sharing"
+                  phx-value-entity-type="wiki_space"
+                  phx-value-entity-id={@wiki_space.id}
+                  class="btn btn-ghost btn-sm gap-1"
+                >
+                  <.icon name="hero-share-micro" class="size-4" /> Share
+                </button>
+                <button
+                  :if={@wiki_user_role in ["manager", "owner"]}
                   phx-click="delete_wiki_page"
                   data-confirm="Delete this page and all children?"
                   class="btn btn-ghost btn-sm text-error gap-1"
@@ -1255,6 +1289,16 @@ defmodule LiteskillWeb.ChatLive do
                 <button phx-click="open_wiki_export_modal" class="btn btn-ghost btn-sm gap-1">
                   <.icon name="hero-book-open-micro" class="size-4" /> Export to Wiki
                 </button>
+                <button
+                  :if={@report}
+                  phx-click="open_sharing"
+                  phx-value-entity-type="report"
+                  phx-value-entity-id={@report.id}
+                  class="btn btn-ghost btn-sm gap-1"
+                  title="Share"
+                >
+                  <.icon name="hero-share-micro" class="size-4" /> Share
+                </button>
               </div>
             </div>
           </header>
@@ -1512,7 +1556,16 @@ defmodule LiteskillWeb.ChatLive do
                     >
                       <.icon name="hero-bars-3-micro" class="size-5" />
                     </button>
-                    <h1 class="text-lg font-semibold truncate">{@conversation.title}</h1>
+                    <h1 class="text-lg font-semibold truncate flex-1">{@conversation.title}</h1>
+                    <button
+                      phx-click="open_sharing"
+                      phx-value-entity-type="conversation"
+                      phx-value-entity-id={@conversation.id}
+                      class="btn btn-ghost btn-sm btn-square"
+                      title="Share"
+                    >
+                      <.icon name="hero-share-micro" class="size-4" />
+                    </button>
                   </div>
                 </header>
 
@@ -1703,6 +1756,18 @@ defmodule LiteskillWeb.ChatLive do
       />
 
       <McpComponents.tool_call_modal tool_call={@tool_call_modal} />
+
+      <SharingComponents.sharing_modal
+        show={@show_sharing}
+        entity_type={@sharing_entity_type || "conversation"}
+        entity_id={@sharing_entity_id}
+        acls={@sharing_acls}
+        user_search_results={@sharing_user_search_results}
+        user_search_query={@sharing_user_search_query}
+        groups={@sharing_groups}
+        current_user_id={@current_user.id}
+        error={@sharing_error}
+      />
     </div>
     """
   end
@@ -1964,7 +2029,14 @@ defmodule LiteskillWeb.ChatLive do
 
       Task.start(fn ->
         result =
-          Liteskill.Rag.search_and_rerank(coll_id, query, user_id, top_n: 10, search_limit: 50)
+          if coll_id == "all" do
+            Liteskill.Rag.augment_context(query, user_id)
+          else
+            Liteskill.Rag.search_accessible(coll_id, query, user_id,
+              top_n: 10,
+              search_limit: 50
+            )
+          end
 
         send(lv, {:rag_search_result, result})
       end)
@@ -2704,6 +2776,182 @@ defmodule LiteskillWeb.ChatLive do
 
   def handle_event(event, params, socket) when event in @profile_events do
     ProfileLive.handle_event(event, params, socket)
+  end
+
+  # --- Sharing Modal Events ---
+
+  def handle_event("open_sharing", %{"entity-type" => type, "entity-id" => id}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    acls = Liteskill.Authorization.list_acls(type, id)
+
+    acls =
+      if acls == [] do
+        Liteskill.Authorization.create_owner_acl(type, id, user_id)
+        Liteskill.Authorization.list_acls(type, id)
+      else
+        acls
+      end
+
+    groups = Liteskill.Groups.list_groups(user_id)
+
+    filtered_groups =
+      Enum.reject(groups, fn g ->
+        Enum.any?(acls, &(&1.group_id == g.id))
+      end)
+
+    {:noreply,
+     assign(socket,
+       show_sharing: true,
+       sharing_entity_type: type,
+       sharing_entity_id: id,
+       sharing_acls: acls,
+       sharing_user_search_results: [],
+       sharing_user_search_query: "",
+       sharing_groups: filtered_groups,
+       sharing_error: nil
+     )}
+  end
+
+  def handle_event("close_sharing", _params, socket) do
+    {:noreply,
+     assign(socket,
+       show_sharing: false,
+       sharing_entity_type: nil,
+       sharing_entity_id: nil,
+       sharing_acls: [],
+       sharing_user_search_results: [],
+       sharing_user_search_query: "",
+       sharing_groups: [],
+       sharing_error: nil
+     )}
+  end
+
+  def handle_event("search_users", %{"user_search" => query}, socket) do
+    if String.length(query) >= 2 do
+      existing_user_ids =
+        Enum.map(socket.assigns.sharing_acls, & &1.user_id) |> Enum.reject(&is_nil/1)
+
+      exclude = [socket.assigns.current_user.id | existing_user_ids]
+      results = Liteskill.Accounts.search_users(query, exclude: exclude, limit: 5)
+
+      {:noreply,
+       assign(socket,
+         sharing_user_search_results: results,
+         sharing_user_search_query: query
+       )}
+    else
+      {:noreply,
+       assign(socket, sharing_user_search_results: [], sharing_user_search_query: query)}
+    end
+  end
+
+  def handle_event("grant_access", %{"user-id" => user_id, "role" => role}, socket) do
+    type = socket.assigns.sharing_entity_type
+    id = socket.assigns.sharing_entity_id
+    grantor_id = socket.assigns.current_user.id
+
+    case Liteskill.Authorization.grant_access(type, id, grantor_id, user_id, role) do
+      {:ok, _acl} ->
+        acls = Liteskill.Authorization.list_acls(type, id)
+
+        {:noreply,
+         assign(socket,
+           sharing_acls: acls,
+           sharing_user_search_results: [],
+           sharing_user_search_query: "",
+           sharing_error: nil
+         )}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, sharing_error: humanize_sharing_error(reason))}
+    end
+  end
+
+  def handle_event("grant_group_access", %{"group-id" => group_id, "role" => role}, socket) do
+    type = socket.assigns.sharing_entity_type
+    id = socket.assigns.sharing_entity_id
+    grantor_id = socket.assigns.current_user.id
+
+    case Liteskill.Authorization.grant_group_access(type, id, grantor_id, group_id, role) do
+      {:ok, _acl} ->
+        acls = Liteskill.Authorization.list_acls(type, id)
+        groups = Liteskill.Groups.list_groups(grantor_id)
+
+        filtered_groups =
+          Enum.reject(groups, fn g -> Enum.any?(acls, &(&1.group_id == g.id)) end)
+
+        {:noreply,
+         assign(socket,
+           sharing_acls: acls,
+           sharing_groups: filtered_groups,
+           sharing_error: nil
+         )}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, sharing_error: humanize_sharing_error(reason))}
+    end
+  end
+
+  def handle_event("change_role", %{"acl-id" => acl_id, "role" => new_role}, socket) do
+    type = socket.assigns.sharing_entity_type
+    id = socket.assigns.sharing_entity_id
+    grantor_id = socket.assigns.current_user.id
+
+    acl = Enum.find(socket.assigns.sharing_acls, &(&1.id == acl_id))
+
+    if acl && acl.user_id do
+      case Liteskill.Authorization.update_role(type, id, grantor_id, acl.user_id, new_role) do
+        {:ok, _} ->
+          acls = Liteskill.Authorization.list_acls(type, id)
+          {:noreply, assign(socket, sharing_acls: acls, sharing_error: nil)}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, sharing_error: humanize_sharing_error(reason))}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("revoke_access", %{"user-id" => user_id}, socket) do
+    type = socket.assigns.sharing_entity_type
+    id = socket.assigns.sharing_entity_id
+    revoker_id = socket.assigns.current_user.id
+
+    case Liteskill.Authorization.revoke_access(type, id, revoker_id, user_id) do
+      {:ok, _} ->
+        acls = Liteskill.Authorization.list_acls(type, id)
+        {:noreply, assign(socket, sharing_acls: acls, sharing_error: nil)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, sharing_error: humanize_sharing_error(reason))}
+    end
+  end
+
+  def handle_event("revoke_group_access", %{"group-id" => group_id}, socket) do
+    type = socket.assigns.sharing_entity_type
+    id = socket.assigns.sharing_entity_id
+    revoker_id = socket.assigns.current_user.id
+
+    case Liteskill.Authorization.revoke_group_access(type, id, revoker_id, group_id) do
+      {:ok, _} ->
+        acls = Liteskill.Authorization.list_acls(type, id)
+        groups = Liteskill.Groups.list_groups(revoker_id)
+
+        filtered_groups =
+          Enum.reject(groups, fn g -> Enum.any?(acls, &(&1.group_id == g.id)) end)
+
+        {:noreply,
+         assign(socket,
+           sharing_acls: acls,
+           sharing_groups: filtered_groups,
+           sharing_error: nil
+         )}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, sharing_error: humanize_sharing_error(reason))}
+    end
   end
 
   # --- PubSub Handlers ---
@@ -3455,4 +3703,16 @@ defmodule LiteskillWeb.ChatLive do
       detail: "An unexpected error occurred. Please try again."
     }
   end
+
+  defp humanize_sharing_error(:no_access), do: "You don't have permission to share this"
+  defp humanize_sharing_error(:forbidden), do: "You don't have permission for this action"
+  defp humanize_sharing_error(:cannot_grant_owner), do: "Cannot grant owner role"
+  defp humanize_sharing_error(:cannot_revoke_owner), do: "Cannot revoke owner access"
+  defp humanize_sharing_error(:not_found), do: "User or access entry not found"
+  defp humanize_sharing_error(:cannot_modify_owner), do: "Cannot change owner's role"
+
+  defp humanize_sharing_error(reason) when is_atom(reason),
+    do: reason |> Atom.to_string() |> String.replace("_", " ")
+
+  defp humanize_sharing_error(_), do: "An error occurred"
 end

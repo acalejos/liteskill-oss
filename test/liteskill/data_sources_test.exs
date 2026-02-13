@@ -1,6 +1,8 @@
 defmodule Liteskill.DataSourcesTest do
   use Liteskill.DataCase, async: true
 
+  alias Liteskill.Authorization
+  alias Liteskill.Authorization.EntityAcl
   alias Liteskill.DataSources
 
   setup do
@@ -143,6 +145,17 @@ defmodule Liteskill.DataSourcesTest do
       assert Enum.any?(sources, &(&1.id == source.id))
     end
 
+    test "includes sources shared via ACL", %{owner: owner, other: other} do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Shared Source", source_type: "manual"}, other.id)
+
+      {:ok, _} =
+        Authorization.grant_access("source", source.id, other.id, owner.id, "viewer")
+
+      sources = DataSources.list_sources(owner.id)
+      assert Enum.any?(sources, &(&1.id == source.id))
+    end
+
     test "does not include other users' sources", %{owner: owner, other: other} do
       {:ok, _source} =
         DataSources.create_source(%{name: "Other Source", source_type: "manual"}, other.id)
@@ -172,6 +185,17 @@ defmodule Liteskill.DataSourcesTest do
       assert source.id == created.id
     end
 
+    test "returns source shared via ACL", %{owner: owner, other: other} do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Shared", source_type: "manual"}, other.id)
+
+      {:ok, _} =
+        Authorization.grant_access("source", source.id, other.id, owner.id, "viewer")
+
+      assert {:ok, found} = DataSources.get_source(source.id, owner.id)
+      assert found.id == source.id
+    end
+
     test "returns :not_found for other user's source", %{owner: owner, other: other} do
       {:ok, source} =
         DataSources.create_source(%{name: "Other Source", source_type: "manual"}, other.id)
@@ -194,6 +218,21 @@ defmodule Liteskill.DataSourcesTest do
       assert source.source_type == "manual"
       assert source.description == "A test"
       assert source.user_id == owner.id
+    end
+
+    test "creates owner ACL", %{owner: owner} do
+      {:ok, source} =
+        DataSources.create_source(%{name: "ACL Test", source_type: "manual"}, owner.id)
+
+      acl =
+        Repo.one!(
+          from(a in EntityAcl,
+            where: a.entity_type == "source" and a.entity_id == ^source.id
+          )
+        )
+
+      assert acl.user_id == owner.id
+      assert acl.role == "owner"
     end
 
     test "fails without required name", %{owner: owner} do
@@ -969,6 +1008,502 @@ defmodule Liteskill.DataSourcesTest do
                )
 
       assert doc.content == "v2"
+    end
+  end
+
+  # --- Wiki Space ACL ---
+
+  describe "wiki space ACL - create_document auto-creates owner ACL" do
+    test "creates owner ACL for new wiki space", %{owner: owner} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "ACL Space"}, owner.id)
+
+      acl =
+        Repo.one!(
+          from(a in EntityAcl,
+            where: a.entity_type == "wiki_space" and a.entity_id == ^space.id
+          )
+        )
+
+      assert acl.user_id == owner.id
+      assert acl.role == "owner"
+    end
+
+    test "does not create ACL for non-wiki documents", %{owner: owner} do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Non Wiki", source_type: "manual"}, owner.id)
+
+      {:ok, doc} =
+        DataSources.create_document(source.id, %{title: "Not Wiki"}, owner.id)
+
+      acl =
+        Repo.one(
+          from(a in EntityAcl,
+            where: a.entity_type == "wiki_space" and a.entity_id == ^doc.id
+          )
+        )
+
+      assert acl == nil
+    end
+  end
+
+  describe "wiki space ACL - get_document" do
+    test "returns doc for viewer ACL user", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Shared Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      assert {:ok, doc} = DataSources.get_document(space.id, other.id)
+      assert doc.id == space.id
+    end
+
+    test "returns child doc for viewer ACL user", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child Page"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      assert {:ok, doc} = DataSources.get_document(child.id, other.id)
+      assert doc.id == child.id
+    end
+
+    test "returns :not_found for no-ACL user", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Private Space"}, owner.id)
+
+      assert {:error, :not_found} = DataSources.get_document(space.id, other.id)
+    end
+  end
+
+  describe "wiki space ACL - get_document_with_role" do
+    test "returns owner role for space owner", %{owner: owner} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "My Space"}, owner.id)
+
+      assert {:ok, doc, "owner"} = DataSources.get_document_with_role(space.id, owner.id)
+      assert doc.id == space.id
+    end
+
+    test "returns editor role for editor user", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Editor Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "editor")
+
+      assert {:ok, _, "editor"} = DataSources.get_document_with_role(space.id, other.id)
+    end
+
+    test "returns viewer role for viewer user", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Viewer Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      assert {:ok, _, "viewer"} = DataSources.get_document_with_role(space.id, other.id)
+    end
+
+    test "returns :not_found for no-ACL user", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Closed Space"}, owner.id)
+
+      assert {:error, :not_found} = DataSources.get_document_with_role(space.id, other.id)
+    end
+
+    test "returns :not_found for nonexistent ID", %{owner: owner} do
+      assert {:error, :not_found} =
+               DataSources.get_document_with_role(Ecto.UUID.generate(), owner.id)
+    end
+
+    test "returns role for child doc via space ACL", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "manager")
+
+      assert {:ok, _, "manager"} = DataSources.get_document_with_role(child.id, other.id)
+    end
+  end
+
+  describe "wiki space ACL - list_documents_paginated" do
+    test "includes shared spaces", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Shared Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      result = DataSources.list_documents_paginated("builtin:wiki", other.id, parent_id: nil)
+      assert Enum.any?(result.documents, &(&1.id == space.id))
+    end
+
+    test "excludes unshared spaces", %{owner: owner, other: other} do
+      {:ok, _space} =
+        DataSources.create_document("builtin:wiki", %{title: "Hidden Space"}, owner.id)
+
+      result = DataSources.list_documents_paginated("builtin:wiki", other.id, parent_id: nil)
+      assert result.total == 0
+    end
+  end
+
+  describe "wiki space ACL - space_tree" do
+    test "returns tree for ACL-shared space", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Shared"}, owner.id)
+
+      {:ok, _child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      tree = DataSources.space_tree("builtin:wiki", space.id, other.id)
+      assert length(tree) == 1
+      assert hd(tree).document.title == "Child"
+    end
+
+    test "returns empty for unshared space", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Private"}, owner.id)
+
+      {:ok, _child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      assert DataSources.space_tree("builtin:wiki", space.id, other.id) == []
+    end
+
+    test "returns empty for nonexistent space", %{owner: owner} do
+      assert DataSources.space_tree("builtin:wiki", Ecto.UUID.generate(), owner.id) == []
+    end
+  end
+
+  describe "wiki space ACL - create_child_document" do
+    test "editor can create child in shared space", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Editor Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "editor")
+
+      assert {:ok, child} =
+               DataSources.create_child_document(
+                 "builtin:wiki",
+                 space.id,
+                 %{title: "New Page"},
+                 other.id
+               )
+
+      # Child should have space owner's user_id
+      assert child.user_id == owner.id
+      assert child.parent_document_id == space.id
+    end
+
+    test "viewer cannot create child in shared space", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Viewer Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      assert {:error, :forbidden} =
+               DataSources.create_child_document(
+                 "builtin:wiki",
+                 space.id,
+                 %{title: "Denied"},
+                 other.id
+               )
+    end
+
+    test "no-ACL user cannot create child", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "No ACL Space"}, owner.id)
+
+      assert {:error, _} =
+               DataSources.create_child_document(
+                 "builtin:wiki",
+                 space.id,
+                 %{title: "Denied"},
+                 other.id
+               )
+    end
+  end
+
+  describe "wiki space ACL - update_document" do
+    test "editor can update doc in shared space", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Page"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "editor")
+
+      assert {:ok, updated} =
+               DataSources.update_document(child.id, %{title: "Updated Page"}, other.id)
+
+      assert updated.title == "Updated Page"
+    end
+
+    test "viewer cannot update doc in shared space", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Page"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      assert {:error, :not_found} =
+               DataSources.update_document(child.id, %{title: "Denied"}, other.id)
+    end
+  end
+
+  describe "wiki space ACL - delete_document" do
+    test "manager can delete child page", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "To Delete"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "manager")
+
+      assert {:ok, _} = DataSources.delete_document(child.id, other.id)
+    end
+
+    test "editor cannot delete child page", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Protected"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "editor")
+
+      assert {:error, :forbidden} = DataSources.delete_document(child.id, other.id)
+    end
+
+    test "only space owner can delete the space itself", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "manager")
+
+      assert {:error, :forbidden} = DataSources.delete_document(space.id, other.id)
+      assert {:ok, _} = DataSources.delete_document(space.id, owner.id)
+    end
+  end
+
+  describe "non-wiki document access" do
+    test "get_document returns :not_found for other user's non-wiki doc", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Manual", source_type: "manual"}, other.id)
+
+      {:ok, doc} = DataSources.create_document(source.id, %{title: "Other's Doc"}, other.id)
+      assert {:error, :not_found} = DataSources.get_document(doc.id, owner.id)
+    end
+
+    test "get_document_with_role returns :not_found for other user's non-wiki doc", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Manual", source_type: "manual"}, other.id)
+
+      {:ok, doc} = DataSources.create_document(source.id, %{title: "Other's Doc"}, other.id)
+      assert {:error, :not_found} = DataSources.get_document_with_role(doc.id, owner.id)
+    end
+
+    test "update_document returns :not_found for nonexistent ID", %{owner: owner} do
+      assert {:error, :not_found} =
+               DataSources.update_document(Ecto.UUID.generate(), %{title: "X"}, owner.id)
+    end
+
+    test "update_document returns :not_found for other user's non-wiki doc", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Manual", source_type: "manual"}, other.id)
+
+      {:ok, doc} = DataSources.create_document(source.id, %{title: "Other's"}, other.id)
+
+      assert {:error, :not_found} =
+               DataSources.update_document(doc.id, %{title: "Hacked"}, owner.id)
+    end
+
+    test "delete_document returns :not_found for nonexistent ID", %{owner: owner} do
+      assert {:error, :not_found} =
+               DataSources.delete_document(Ecto.UUID.generate(), owner.id)
+    end
+
+    test "delete_document returns :not_found for other user's non-wiki doc", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Manual", source_type: "manual"}, other.id)
+
+      {:ok, doc} = DataSources.create_document(source.id, %{title: "Other's"}, other.id)
+      assert {:error, :not_found} = DataSources.delete_document(doc.id, owner.id)
+    end
+
+    test "list_documents_paginated for non-wiki source scoped to user_id", %{
+      owner: owner,
+      other: other
+    } do
+      {:ok, source} =
+        DataSources.create_source(%{name: "Manual", source_type: "manual"}, owner.id)
+
+      {:ok, _} = DataSources.create_document(source.id, %{title: "Mine"}, owner.id)
+      {:ok, _} = DataSources.create_document(source.id, %{title: "Theirs"}, other.id)
+
+      result = DataSources.list_documents_paginated(source.id, owner.id)
+      assert result.total == 1
+      assert hd(result.documents).title == "Mine"
+    end
+  end
+
+  describe "wiki space ACL - delete_document no access" do
+    test "no-ACL user gets :not_found for wiki child deletion", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      assert {:error, :not_found} = DataSources.delete_document(child.id, other.id)
+    end
+
+    test "no-ACL user gets :not_found for wiki space deletion", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      assert {:error, :not_found} = DataSources.delete_document(space.id, other.id)
+    end
+  end
+
+  describe "wiki space ACL - find_root_ancestor" do
+    test "works for shared wiki child doc", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Shared Root"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      {:ok, _} =
+        Authorization.grant_access("wiki_space", space.id, owner.id, other.id, "viewer")
+
+      assert {:ok, root} = DataSources.find_root_ancestor(child.id, other.id)
+      assert root.id == space.id
+    end
+
+    test "returns not_found for unshared wiki doc", %{owner: owner, other: other} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Private Root"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      assert {:error, :not_found} = DataSources.find_root_ancestor(child.id, other.id)
+    end
+  end
+
+  describe "get_space_id/1" do
+    test "returns self ID for root space document", %{owner: owner} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      assert DataSources.get_space_id(space) == space.id
+    end
+
+    test "returns root ancestor ID for child document", %{owner: owner} do
+      {:ok, space} =
+        DataSources.create_document("builtin:wiki", %{title: "Space"}, owner.id)
+
+      {:ok, child} =
+        DataSources.create_child_document(
+          "builtin:wiki",
+          space.id,
+          %{title: "Child"},
+          owner.id
+        )
+
+      assert DataSources.get_space_id(child) == space.id
     end
   end
 

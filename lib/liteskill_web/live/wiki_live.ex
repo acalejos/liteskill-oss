@@ -19,6 +19,7 @@ defmodule LiteskillWeb.WikiLive do
       wiki_editing: nil,
       wiki_parent_id: nil,
       wiki_space: nil,
+      wiki_user_role: nil,
       show_wiki_export_modal: false,
       wiki_export_title: "",
       wiki_export_parent_id: nil,
@@ -36,6 +37,18 @@ defmodule LiteskillWeb.WikiLive do
         parent_id: nil
       )
 
+    enriched_docs =
+      Enum.map(result.documents, fn space ->
+        if space.user_id == user_id do
+          Map.put(space, :space_role, "owner")
+        else
+          case Liteskill.Authorization.get_role("wiki_space", space.id, user_id) do
+            {:ok, role} -> Map.put(space, :space_role, role)
+            _ -> Map.put(space, :space_role, nil)
+          end
+        end
+      end)
+
     Phoenix.Component.assign(socket,
       conversation: nil,
       messages: [],
@@ -43,10 +56,11 @@ defmodule LiteskillWeb.WikiLive do
       stream_content: "",
       pending_tool_calls: [],
       current_source: get_wiki_source(),
-      source_documents: result,
+      source_documents: %{result | documents: enriched_docs},
       source_search: "",
       wiki_sidebar_tree: [],
       wiki_space: nil,
+      wiki_user_role: nil,
       page_title: "Wiki"
     )
   end
@@ -54,8 +68,8 @@ defmodule LiteskillWeb.WikiLive do
   def apply_wiki_action(socket, :wiki_page_show, %{"document_id" => doc_id}) do
     user_id = socket.assigns.current_user.id
 
-    case Liteskill.DataSources.get_document(doc_id, user_id) do
-      {:ok, doc} ->
+    case Liteskill.DataSources.get_document_with_role(doc_id, user_id) do
+      {:ok, doc, role} ->
         space =
           if is_nil(doc.parent_document_id) do
             doc
@@ -84,6 +98,7 @@ defmodule LiteskillWeb.WikiLive do
           wiki_tree: space_children_tree,
           wiki_sidebar_tree: space_children_tree,
           wiki_space: space,
+          wiki_user_role: role,
           show_wiki_form: false,
           wiki_editing: nil,
           wiki_parent_id: nil,

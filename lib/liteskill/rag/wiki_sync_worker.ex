@@ -59,7 +59,10 @@ defmodule Liteskill.Rag.WikiSyncWorker do
           %{
             title: wiki_doc.title,
             content: wiki_doc.content,
-            metadata: %{"wiki_document_id" => wiki_doc.id}
+            metadata: %{
+              "wiki_document_id" => wiki_doc.id,
+              "wiki_space_id" => DataSources.get_space_id(wiki_doc)
+            }
           },
           user_id
         )

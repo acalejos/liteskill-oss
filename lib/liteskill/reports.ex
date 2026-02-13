@@ -7,8 +7,8 @@ defmodule Liteskill.Reports do
   """
 
   alias Liteskill.Accounts.User
-  alias Liteskill.Groups.GroupMembership
-  alias Liteskill.Reports.{Report, ReportAcl, ReportSection, SectionComment}
+  alias Liteskill.Authorization
+  alias Liteskill.Reports.{Report, ReportSection, SectionComment}
   alias Liteskill.Repo
 
   import Ecto.Query
@@ -22,31 +22,17 @@ defmodule Liteskill.Reports do
         |> Report.changeset(%{title: title, user_id: user_id})
         |> Repo.insert!()
 
-      %ReportAcl{}
-      |> ReportAcl.changeset(%{report_id: report.id, user_id: user_id, role: "owner"})
-      |> Repo.insert!()
+      {:ok, _} = Authorization.create_owner_acl("report", report.id, user_id)
 
       report
     end)
   end
 
   def list_reports(user_id) do
-    direct_acl =
-      from(a in ReportAcl, where: a.user_id == ^user_id, select: a.report_id)
-
-    group_acl =
-      from(a in ReportAcl,
-        join: gm in GroupMembership,
-        on: gm.group_id == a.group_id and gm.user_id == ^user_id,
-        where: not is_nil(a.group_id),
-        select: a.report_id
-      )
+    accessible_ids = Authorization.accessible_entity_ids("report", user_id)
 
     Report
-    |> where(
-      [r],
-      r.user_id == ^user_id or r.id in subquery(direct_acl) or r.id in subquery(group_acl)
-    )
+    |> where([r], r.user_id == ^user_id or r.id in subquery(accessible_ids))
     |> order_by([r], desc: r.updated_at)
     |> Repo.all()
   end
@@ -734,60 +720,26 @@ defmodule Liteskill.Reports do
     "\n#{rendered}\n"
   end
 
-  # --- ACL Management ---
+  # --- ACL Management (delegates to Authorization) ---
 
   def grant_access(report_id, owner_id, grantee_email, role \\ "member") do
-    with {:ok, _report} <- authorize_owner(report_id, owner_id) do
-      case Repo.get_by(User, email: grantee_email) do
-        nil ->
-          {:error, :user_not_found}
+    normalized_role = if role == "member", do: "manager", else: role
 
-        grantee ->
-          %ReportAcl{}
-          |> ReportAcl.changeset(%{
-            report_id: report_id,
-            user_id: grantee.id,
-            role: role
-          })
-          |> Repo.insert()
-      end
+    case Repo.get_by(User, email: grantee_email) do
+      nil ->
+        {:error, :user_not_found}
+
+      grantee ->
+        Authorization.grant_access("report", report_id, owner_id, grantee.id, normalized_role)
     end
   end
 
   def revoke_access(report_id, owner_id, target_user_id) do
-    with {:ok, _report} <- authorize_owner(report_id, owner_id) do
-      case Repo.one(
-             from(a in ReportAcl,
-               where: a.report_id == ^report_id and a.user_id == ^target_user_id
-             )
-           ) do
-        nil ->
-          {:error, :not_found}
-
-        %ReportAcl{role: "owner"} ->
-          {:error, :cannot_revoke_owner}
-
-        acl ->
-          Repo.delete(acl)
-      end
-    end
+    Authorization.revoke_access("report", report_id, owner_id, target_user_id)
   end
 
   def leave_report(report_id, user_id) do
-    case Repo.one(
-           from(a in ReportAcl,
-             where: a.report_id == ^report_id and a.user_id == ^user_id
-           )
-         ) do
-      nil ->
-        {:error, :not_found}
-
-      %ReportAcl{role: "owner"} ->
-        {:error, :cannot_leave_as_owner}
-
-      acl ->
-        Repo.delete(acl)
-    end
+    Authorization.leave("report", report_id, user_id)
   end
 
   # --- Authorization Helpers ---
@@ -816,17 +768,6 @@ defmodule Liteskill.Reports do
 
   defp has_access?(report, user_id) do
     report.user_id == user_id or
-      Repo.exists?(
-        from(a in ReportAcl,
-          where: a.report_id == ^report.id and a.user_id == ^user_id
-        )
-      ) or
-      Repo.exists?(
-        from(a in ReportAcl,
-          join: gm in GroupMembership,
-          on: gm.group_id == a.group_id and gm.user_id == ^user_id,
-          where: a.report_id == ^report.id and not is_nil(a.group_id)
-        )
-      )
+      Authorization.has_access?("report", report.id, user_id)
   end
 end

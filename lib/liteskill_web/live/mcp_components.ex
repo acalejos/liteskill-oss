@@ -49,6 +49,15 @@ defmodule LiteskillWeb.McpComponents do
           </button>
           <button
             :if={@owned && !@builtin?}
+            phx-click="open_sharing"
+            phx-value-entity-type="mcp_server"
+            phx-value-entity-id={@server.id}
+            class="btn btn-ghost btn-xs"
+          >
+            <.icon name="hero-share-micro" class="size-4" /> Share
+          </button>
+          <button
+            :if={@owned && !@builtin?}
             phx-click="edit_mcp"
             phx-value-id={@server.id}
             class="btn btn-ghost btn-xs"
