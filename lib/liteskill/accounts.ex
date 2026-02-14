@@ -102,7 +102,9 @@ defmodule Liteskill.Accounts do
   def search_users(query, opts \\ []) do
     limit = Keyword.get(opts, :limit, 10)
     exclude_ids = Keyword.get(opts, :exclude, [])
-    term = "%#{String.replace(query, "%", "\\%")}%"
+
+    term =
+      "%#{query |> String.replace("\\", "\\\\") |> String.replace("%", "\\%") |> String.replace("_", "\\_")}%"
 
     base =
       User

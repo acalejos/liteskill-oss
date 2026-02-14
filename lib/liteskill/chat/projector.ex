@@ -60,14 +60,28 @@ defmodule Liteskill.Chat.Projector do
 
   # --- Projection Logic ---
 
-  defp do_project(_stream_id, events) do
+  defp do_project(stream_id, events) do
     Enum.each(events, fn event ->
       try do
         project_event(event)
       rescue
         # coveralls-ignore-start
         e ->
-          Logger.error("Projector failed on #{event.event_type}: #{Exception.message(e)}")
+          Logger.error(
+            "Projector failed: stream=#{stream_id} event=#{event.event_type} version=#{event.stream_version} error=#{Exception.message(e)}"
+          )
+
+          :telemetry.execute(
+            [:liteskill, :projector, :event_failed],
+            %{count: 1},
+            %{
+              stream_id: stream_id,
+              event_type: event.event_type,
+              stream_version: event.stream_version,
+              error: Exception.message(e)
+            }
+          )
+
           # coveralls-ignore-stop
       end
     end)
@@ -373,7 +387,13 @@ defmodule Liteskill.Chat.Projector do
     case Repo.one(from c in Conversation, where: c.stream_id == ^stream_id) do
       nil ->
         Logger.warning(
-          "Projector: conversation not found for stream #{stream_id}, skipping event"
+          "Projector: conversation not found for stream=#{stream_id}, skipping event"
+        )
+
+        :telemetry.execute(
+          [:liteskill, :projector, :conversation_not_found],
+          %{count: 1},
+          %{stream_id: stream_id}
         )
 
       conversation ->

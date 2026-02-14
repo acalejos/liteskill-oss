@@ -3,7 +3,7 @@ defmodule Liteskill.Chat.MessageBuilder do
   Builds LLM-compatible message lists from stored conversation messages.
 
   Transforms projected Message records (with tool_calls) into the format
-  expected by BedrockClient: lists of `%{"role" => ..., "content" => [...]}`.
+  expected by the LLM layer: lists of `%{"role" => ..., "content" => [...]}`.
   """
 
   alias Liteskill.Repo

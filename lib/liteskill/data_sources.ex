@@ -218,19 +218,15 @@ defmodule Liteskill.DataSources do
     end
   end
 
-  def delete_source(id, user_id, opts \\ [])
+  def delete_source(id, user_id)
 
-  def delete_source("builtin:" <> _, _user_id, _opts), do: {:error, :cannot_delete_builtin}
+  def delete_source("builtin:" <> _, _user_id), do: {:error, :cannot_delete_builtin}
 
-  def delete_source(id, user_id, opts) do
+  def delete_source(id, user_id) do
     source =
-      if Keyword.get(opts, :is_admin, false) do
-        Repo.get(Source, id)
-      else
-        case Repo.get(Source, id) do
-          %Source{user_id: ^user_id} = s -> s
-          _ -> nil
-        end
+      case Repo.get(Source, id) do
+        %Source{user_id: ^user_id} = s -> s
+        _ -> nil
       end
 
     case source do
@@ -294,7 +290,13 @@ defmodule Liteskill.DataSources do
   defp maybe_search(query, ""), do: query
 
   defp maybe_search(query, search) do
-    term = "%#{search}%"
+    escaped =
+      search
+      |> String.replace("\\", "\\\\")
+      |> String.replace("%", "\\%")
+      |> String.replace("_", "\\_")
+
+    term = "%#{escaped}%"
     where(query, [d], ilike(d.title, ^term) or ilike(d.content, ^term))
   end
 

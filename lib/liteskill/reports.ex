@@ -13,6 +13,16 @@ defmodule Liteskill.Reports do
 
   import Ecto.Query
 
+  @doc "System prompt for the LLM agent that addresses report comments."
+  def address_comments_system_prompt do
+    "You are a report editing assistant. You have access to the Reports tools. " <>
+      "When asked to address comments, use reports__get to read the report and see all comments. " <>
+      "For each [OPEN] comment, make meaningful section updates using reports__modify_sections, " <>
+      "then mark the comment as addressed using reports__comment with the \"resolve\" action. " <>
+      "If you are unsure how to address a comment, add an agent comment with your question " <>
+      "rather than making incorrect changes."
+  end
+
   # --- Reports CRUD ---
 
   def create_report(user_id, title) do

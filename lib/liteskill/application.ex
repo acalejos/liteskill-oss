@@ -11,6 +11,9 @@ defmodule Liteskill.Application do
 
   @impl true
   def start(_type, _args) do
+    Liteskill.Crypto.validate_key!()
+    LiteskillWeb.Plugs.RateLimiter.create_table()
+
     children =
       [
         LiteskillWeb.Telemetry,
@@ -24,6 +27,8 @@ defmodule Liteskill.Application do
           do: {Task, fn -> Liteskill.Accounts.ensure_admin_user() end}
         ),
         # coveralls-ignore-stop
+        # Periodic sweep of stale rate limiter ETS buckets
+        LiteskillWeb.Plugs.RateLimiter.Sweeper,
         # Task supervisor for LLM streaming and other async work
         {Task.Supervisor, name: Liteskill.TaskSupervisor},
         # Chat projector - projects events to read-model tables

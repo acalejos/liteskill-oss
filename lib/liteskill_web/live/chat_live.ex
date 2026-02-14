@@ -1812,7 +1812,7 @@ defmodule LiteskillWeb.ChatLive do
 
     result =
       Liteskill.DataSources.list_documents_paginated(source_ref, user_id,
-        page: String.to_integer(page),
+        page: safe_page(page),
         search: if(search == "", do: nil, else: search)
       )
 
@@ -1985,9 +1985,8 @@ defmodule LiteskillWeb.ChatLive do
   def handle_event("delete_source", _params, socket) do
     user = socket.assigns.current_user
     id = socket.assigns.confirm_delete_source_id
-    is_admin = Liteskill.Accounts.User.admin?(user)
 
-    case Liteskill.DataSources.delete_source(id, user.id, is_admin: is_admin) do
+    case Liteskill.DataSources.delete_source(id, user.id) do
       {:ok, _} ->
         sources = Liteskill.DataSources.list_sources_with_counts(user.id)
 
@@ -2011,12 +2010,16 @@ defmodule LiteskillWeb.ChatLive do
 
     case Liteskill.DataSources.start_sync(source.id, user_id) do
       {:ok, _} ->
-        {:ok, updated} = Liteskill.DataSources.get_source(source.id, user_id)
+        case Liteskill.DataSources.get_source(source.id, user_id) do
+          {:ok, updated} ->
+            {:noreply,
+             socket
+             |> assign(current_source: updated)
+             |> put_flash(:info, "Sync started.")}
 
-        {:noreply,
-         socket
-         |> assign(current_source: updated)
-         |> put_flash(:info, "Sync started.")}
+          {:error, _} ->
+            {:noreply, put_flash(socket, :info, "Sync started.")}
+        end
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Failed to start sync.")}
@@ -2033,15 +2036,19 @@ defmodule LiteskillWeb.ChatLive do
       user_id = socket.assigns.current_user.id
       lv = self()
 
-      Task.start(fn ->
+      Task.Supervisor.start_child(Liteskill.TaskSupervisor, fn ->
         result =
-          if coll_id == "all" do
-            Liteskill.Rag.augment_context(query, user_id)
-          else
-            Liteskill.Rag.search_accessible(coll_id, query, user_id,
-              top_n: 10,
-              search_limit: 50
-            )
+          try do
+            if coll_id == "all" do
+              Liteskill.Rag.augment_context(query, user_id)
+            else
+              Liteskill.Rag.search_accessible(coll_id, query, user_id,
+                top_n: 10,
+                search_limit: 50
+              )
+            end
+          rescue
+            e -> {:error, Exception.message(e)}
           end
 
         send(lv, {:rag_search_result, result})
@@ -2247,7 +2254,7 @@ defmodule LiteskillWeb.ChatLive do
 
   @impl true
   def handle_event("conversations_page", %{"page" => page}, socket) do
-    page = String.to_integer(page)
+    page = safe_page(page)
     user_id = socket.assigns.current_user.id
     page_size = socket.assigns.conversations_page_size
     search = socket.assigns.conversations_search
@@ -2303,19 +2310,29 @@ defmodule LiteskillWeb.ChatLive do
   def handle_event("bulk_archive_conversations", _params, socket) do
     user_id = socket.assigns.current_user.id
     ids = MapSet.to_list(socket.assigns.conversations_selected)
+    total = length(ids)
 
-    Chat.bulk_archive_conversations(ids, user_id)
+    {:ok, archived} = Chat.bulk_archive_conversations(ids, user_id)
 
     conversations = Chat.list_conversations(user_id)
 
-    {:noreply,
-     socket
-     |> assign(
-       conversations: conversations,
-       confirm_bulk_delete: false,
-       conversations_selected: MapSet.new()
-     )
-     |> refresh_managed_conversations()}
+    socket =
+      socket
+      |> assign(
+        conversations: conversations,
+        confirm_bulk_delete: false,
+        conversations_selected: MapSet.new()
+      )
+      |> refresh_managed_conversations()
+
+    socket =
+      if archived < total do
+        put_flash(socket, :error, "Archived #{archived} of #{total} conversations")
+      else
+        socket
+      end
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -2387,7 +2404,7 @@ defmodule LiteskillWeb.ChatLive do
          edit_auto_confirm_tools: auto_confirm
        )}
     else
-      {:noreply, socket}
+      {:noreply, put_flash(socket, :error, "Message not found")}
     end
   end
 
@@ -2687,13 +2704,7 @@ defmodule LiteskillWeb.ChatLive do
     user_id = socket.assigns.current_user.id
     report = socket.assigns.report
 
-    system_prompt =
-      "You are a report editing assistant. You have access to the Reports tools. " <>
-        "When asked to address comments, use reports__get to read the report and see all comments. " <>
-        "For each [OPEN] comment, make meaningful section updates using reports__modify_sections, " <>
-        "then mark the comment as addressed using reports__comment with the \"resolve\" action. " <>
-        "If you are unsure how to address a comment, add an agent comment with your question " <>
-        "rather than making incorrect changes."
+    system_prompt = Liteskill.Reports.address_comments_system_prompt()
 
     case Chat.create_conversation(%{
            user_id: user_id,
@@ -2787,39 +2798,44 @@ defmodule LiteskillWeb.ChatLive do
 
   # --- Sharing Modal Events ---
 
+  @impl true
   def handle_event("open_sharing", %{"entity-type" => type, "entity-id" => id}, socket) do
     user_id = socket.assigns.current_user.id
 
-    acls = Liteskill.Authorization.list_acls(type, id)
-
-    acls =
-      if acls == [] do
+    # Bootstrap owner ACL if none exist AND user actually owns the entity
+    if Liteskill.Authorization.list_acls(type, id) == [] do
+      if Liteskill.Authorization.verify_ownership(type, id, user_id) == :ok do
         Liteskill.Authorization.create_owner_acl(type, id, user_id)
-        Liteskill.Authorization.list_acls(type, id)
-      else
-        acls
       end
+    end
 
-    groups = Liteskill.Groups.list_groups(user_id)
+    # Authorize: user must have access to view sharing settings
+    if Liteskill.Authorization.has_access?(type, id, user_id) do
+      acls = Liteskill.Authorization.list_acls(type, id)
+      groups = Liteskill.Groups.list_groups(user_id)
 
-    filtered_groups =
-      Enum.reject(groups, fn g ->
-        Enum.any?(acls, &(&1.group_id == g.id))
-      end)
+      filtered_groups =
+        Enum.reject(groups, fn g ->
+          Enum.any?(acls, &(&1.group_id == g.id))
+        end)
 
-    {:noreply,
-     assign(socket,
-       show_sharing: true,
-       sharing_entity_type: type,
-       sharing_entity_id: id,
-       sharing_acls: acls,
-       sharing_user_search_results: [],
-       sharing_user_search_query: "",
-       sharing_groups: filtered_groups,
-       sharing_error: nil
-     )}
+      {:noreply,
+       assign(socket,
+         show_sharing: true,
+         sharing_entity_type: type,
+         sharing_entity_id: id,
+         sharing_acls: acls,
+         sharing_user_search_results: [],
+         sharing_user_search_query: "",
+         sharing_groups: filtered_groups,
+         sharing_error: nil
+       )}
+    else
+      {:noreply, socket}
+    end
   end
 
+  @impl true
   def handle_event("close_sharing", _params, socket) do
     {:noreply,
      assign(socket,
@@ -2834,6 +2850,7 @@ defmodule LiteskillWeb.ChatLive do
      )}
   end
 
+  @impl true
   def handle_event("search_users", %{"user_search" => query}, socket) do
     if String.length(query) >= 2 do
       existing_user_ids =
@@ -2853,6 +2870,7 @@ defmodule LiteskillWeb.ChatLive do
     end
   end
 
+  @impl true
   def handle_event("grant_access", %{"user-id" => user_id, "role" => role}, socket) do
     type = socket.assigns.sharing_entity_type
     id = socket.assigns.sharing_entity_id
@@ -2875,6 +2893,7 @@ defmodule LiteskillWeb.ChatLive do
     end
   end
 
+  @impl true
   def handle_event("grant_group_access", %{"group-id" => group_id, "role" => role}, socket) do
     type = socket.assigns.sharing_entity_type
     id = socket.assigns.sharing_entity_id
@@ -2900,6 +2919,7 @@ defmodule LiteskillWeb.ChatLive do
     end
   end
 
+  @impl true
   def handle_event("change_role", %{"acl-id" => acl_id, "role" => new_role}, socket) do
     type = socket.assigns.sharing_entity_type
     id = socket.assigns.sharing_entity_id
@@ -2917,10 +2937,11 @@ defmodule LiteskillWeb.ChatLive do
           {:noreply, assign(socket, sharing_error: humanize_sharing_error(reason))}
       end
     else
-      {:noreply, socket}
+      {:noreply, assign(socket, sharing_error: "Role change not applicable")}
     end
   end
 
+  @impl true
   def handle_event("revoke_access", %{"user-id" => user_id}, socket) do
     type = socket.assigns.sharing_entity_type
     id = socket.assigns.sharing_entity_id
@@ -2936,6 +2957,7 @@ defmodule LiteskillWeb.ChatLive do
     end
   end
 
+  @impl true
   def handle_event("revoke_group_access", %{"group-id" => group_id}, socket) do
     type = socket.assigns.sharing_entity_type
     id = socket.assigns.sharing_entity_id
@@ -2970,27 +2992,32 @@ defmodule LiteskillWeb.ChatLive do
   end
 
   def handle_info(:reload_after_complete, socket) do
-    user_id = socket.assigns.current_user.id
-    conversation = socket.assigns.conversation
+    case socket.assigns.conversation do
+      nil ->
+        {:noreply, socket}
 
-    {:ok, messages} = Chat.list_messages(conversation.id, user_id)
-    conversations = Chat.list_conversations(user_id)
+      conversation ->
+        user_id = socket.assigns.current_user.id
 
-    # Reload conversation to check actual status — avoids race when
-    # StreamHandler immediately starts a new round after completing
-    {:ok, fresh_conv} = Chat.get_conversation(conversation.id, user_id)
-    still_streaming = fresh_conv.status == "streaming"
+        {:ok, messages} = Chat.list_messages(conversation.id, user_id)
+        conversations = Chat.list_conversations(user_id)
 
-    {:noreply,
-     assign(socket,
-       streaming: still_streaming,
-       stream_content: if(still_streaming, do: socket.assigns.stream_content, else: ""),
-       messages: messages,
-       conversations: conversations,
-       conversation: fresh_conv,
-       pending_tool_calls: [],
-       stream_task_pid: if(still_streaming, do: socket.assigns.stream_task_pid, else: nil)
-     )}
+        # Reload conversation to check actual status — avoids race when
+        # StreamHandler immediately starts a new round after completing
+        {:ok, fresh_conv} = Chat.get_conversation(conversation.id, user_id)
+        still_streaming = fresh_conv.status == "streaming"
+
+        {:noreply,
+         assign(socket,
+           streaming: still_streaming,
+           stream_content: if(still_streaming, do: socket.assigns.stream_content, else: ""),
+           messages: messages,
+           conversations: conversations,
+           conversation: fresh_conv,
+           pending_tool_calls: [],
+           stream_task_pid: if(still_streaming, do: socket.assigns.stream_task_pid, else: nil)
+         )}
+    end
   end
 
   def handle_info(:fetch_tools, socket) do
@@ -3086,7 +3113,7 @@ defmodule LiteskillWeb.ChatLive do
     message =
       case reason do
         %{status: status} -> "Search failed (HTTP #{status})"
-        _ -> "Search failed: #{inspect(reason)}"
+        _ -> "Search failed"
       end
 
     {:noreply,
@@ -3094,27 +3121,32 @@ defmodule LiteskillWeb.ChatLive do
   end
 
   def handle_info(:reload_tool_calls, socket) do
-    user_id = socket.assigns.current_user.id
-    conversation = socket.assigns.conversation
+    case socket.assigns.conversation do
+      nil ->
+        {:noreply, socket}
 
-    {:ok, messages} = Chat.list_messages(conversation.id, user_id)
-    db_pending = load_pending_tool_calls(messages)
+      conversation ->
+        user_id = socket.assigns.current_user.id
 
-    # During streaming, load_pending_tool_calls returns [] because the message
-    # hasn't completed with stop_reason: "tool_use" yet. Keep the in-memory
-    # pending_tool_calls built from PubSub events in that case.
-    pending =
-      if db_pending != [] do
-        db_pending
-      else
-        if socket.assigns.streaming && socket.assigns.pending_tool_calls != [] do
-          socket.assigns.pending_tool_calls
-        else
-          []
-        end
-      end
+        {:ok, messages} = Chat.list_messages(conversation.id, user_id)
+        db_pending = load_pending_tool_calls(messages)
 
-    {:noreply, assign(socket, messages: messages, pending_tool_calls: pending)}
+        # During streaming, load_pending_tool_calls returns [] because the message
+        # hasn't completed with stop_reason: "tool_use" yet. Keep the in-memory
+        # pending_tool_calls built from PubSub events in that case.
+        pending =
+          if db_pending != [] do
+            db_pending
+          else
+            if socket.assigns.streaming && socket.assigns.pending_tool_calls != [] do
+              socket.assigns.pending_tool_calls
+            else
+              []
+            end
+          end
+
+        {:noreply, assign(socket, messages: messages, pending_tool_calls: pending)}
+    end
   end
 
   def handle_info({:DOWN, _ref, :process, pid, reason}, socket)
@@ -3673,7 +3705,7 @@ defmodule LiteskillWeb.ChatLive do
   defp format_tool_error(%{status: status}), do: "HTTP #{status}"
   defp format_tool_error(%Req.TransportError{reason: reason}), do: "Connection error: #{reason}"
   defp format_tool_error(reason) when is_binary(reason), do: reason
-  defp format_tool_error(reason), do: inspect(reason)
+  defp format_tool_error(_reason), do: "unexpected error"
 
   defp friendly_stream_error("max_retries_exceeded", _msg) do
     %{
@@ -3722,4 +3754,14 @@ defmodule LiteskillWeb.ChatLive do
     do: reason |> Atom.to_string() |> String.replace("_", " ")
 
   defp humanize_sharing_error(_), do: "An error occurred"
+
+  defp safe_page(page) when is_binary(page) do
+    case Integer.parse(page) do
+      {n, ""} when n > 0 -> n
+      _ -> 1
+    end
+  end
+
+  defp safe_page(page) when is_integer(page) and page > 0, do: page
+  defp safe_page(_), do: 1
 end

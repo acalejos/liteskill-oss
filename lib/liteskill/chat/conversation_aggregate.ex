@@ -22,6 +22,10 @@ defmodule Liteskill.Chat.ConversationAggregate do
     current_stream: nil
   ]
 
+  @valid_statuses ~w(created active streaming archived)a
+
+  def valid_statuses, do: @valid_statuses
+
   @impl true
   def init, do: %__MODULE__{}
 

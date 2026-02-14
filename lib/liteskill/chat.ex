@@ -48,21 +48,15 @@ defmodule Liteskill.Chat do
 
   def send_message(conversation_id, user_id, content, opts \\ []) do
     with {:ok, conversation} <- authorize_conversation(conversation_id, user_id) do
-      stream_id = conversation.stream_id
       message_id = Ecto.UUID.generate()
       tool_config = Keyword.get(opts, :tool_config)
 
       command =
         {:add_user_message, %{message_id: message_id, content: content, tool_config: tool_config}}
 
-      case Loader.execute(ConversationAggregate, stream_id, command) do
-        {:ok, _state, events} ->
-          Projector.project_events(stream_id, events)
-          {:ok, Repo.get!(Message, message_id)}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      execute_and_project(conversation.stream_id, command, fn ->
+        {:ok, Repo.get!(Message, message_id)}
+      end)
     end
   end
 
@@ -125,46 +119,27 @@ defmodule Liteskill.Chat do
 
   def archive_conversation(conversation_id, user_id) do
     with {:ok, conversation} <- authorize_conversation(conversation_id, user_id) do
-      case Loader.execute(ConversationAggregate, conversation.stream_id, {:archive, %{}}) do
-        {:ok, _state, events} ->
-          Projector.project_events(conversation.stream_id, events)
-          {:ok, Repo.get!(Conversation, conversation_id)}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      execute_and_project(conversation.stream_id, {:archive, %{}}, fn ->
+        {:ok, Repo.get!(Conversation, conversation_id)}
+      end)
     end
   end
 
   def update_title(conversation_id, user_id, title) do
     with {:ok, conversation} <- authorize_conversation(conversation_id, user_id) do
-      case Loader.execute(
-             ConversationAggregate,
-             conversation.stream_id,
-             {:update_title, %{title: title}}
-           ) do
-        {:ok, _state, events} ->
-          Projector.project_events(conversation.stream_id, events)
-          {:ok, Repo.get!(Conversation, conversation_id)}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      execute_and_project(conversation.stream_id, {:update_title, %{title: title}}, fn ->
+        {:ok, Repo.get!(Conversation, conversation_id)}
+      end)
     end
   end
 
   def truncate_conversation(conversation_id, user_id, message_id) do
     with {:ok, conversation} <- authorize_conversation(conversation_id, user_id) do
-      command = {:truncate_conversation, %{message_id: message_id}}
-
-      case Loader.execute(ConversationAggregate, conversation.stream_id, command) do
-        {:ok, _state, events} ->
-          Projector.project_events(conversation.stream_id, events)
-          {:ok, Repo.get!(Conversation, conversation_id)}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      execute_and_project(
+        conversation.stream_id,
+        {:truncate_conversation, %{message_id: message_id}},
+        fn -> {:ok, Repo.get!(Conversation, conversation_id)} end
+      )
     end
   end
 
@@ -326,32 +301,11 @@ defmodule Liteskill.Chat do
   """
   def recover_stream(conversation_id, user_id) do
     with {:ok, conversation} <- authorize_conversation(conversation_id, user_id) do
-      streaming_msg =
-        Repo.one(
-          from m in Message,
-            where: m.conversation_id == ^conversation_id and m.status == "streaming",
-            order_by: [desc: m.inserted_at],
-            limit: 1
-        )
-
-      if streaming_msg do
-        command =
-          {:fail_stream,
-           %{
-             message_id: streaming_msg.id,
-             error_type: "task_crashed",
-             error_message: "Stream handler process terminated unexpectedly"
-           }}
-
-        case Loader.execute(ConversationAggregate, conversation.stream_id, command) do
-          {:ok, _state, events} ->
-            Projector.project_events(conversation.stream_id, events)
-
-          # coveralls-ignore-next-line
-          {:error, _reason} ->
-            :ok
-        end
-      end
+      do_recover_stream(
+        conversation,
+        "task_crashed",
+        "Stream handler process terminated unexpectedly"
+      )
 
       {:ok, Repo.get!(Conversation, conversation_id)}
     end
@@ -389,10 +343,22 @@ defmodule Liteskill.Chat do
   def recover_stream_by_id(conversation_id) do
     conversation = Repo.get!(Conversation, conversation_id)
 
+    do_recover_stream(
+      conversation,
+      "orphaned_stream",
+      "Stream recovered by periodic sweep — no active handler"
+    )
+
+    :ok
+  end
+
+  # --- Internal Helpers ---
+
+  defp do_recover_stream(conversation, error_type, error_message) do
     streaming_msg =
       Repo.one(
         from m in Message,
-          where: m.conversation_id == ^conversation_id and m.status == "streaming",
+          where: m.conversation_id == ^conversation.id and m.status == "streaming",
           order_by: [desc: m.inserted_at],
           limit: 1
       )
@@ -402,8 +368,8 @@ defmodule Liteskill.Chat do
         {:fail_stream,
          %{
            message_id: streaming_msg.id,
-           error_type: "orphaned_stream",
-           error_message: "Stream recovered by periodic sweep — no active handler"
+           error_type: error_type,
+           error_message: error_message
          }}
 
       case Loader.execute(ConversationAggregate, conversation.stream_id, command) do
@@ -415,11 +381,18 @@ defmodule Liteskill.Chat do
           :ok
       end
     end
-
-    :ok
   end
 
-  # --- Internal Helpers ---
+  defp execute_and_project(stream_id, command, on_success) do
+    case Loader.execute(ConversationAggregate, stream_id, command) do
+      {:ok, _state, events} ->
+        Projector.project_events(stream_id, events)
+        on_success.()
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp authorize_conversation(conversation_id, user_id) do
     case Repo.get(Conversation, conversation_id) do
@@ -445,7 +418,13 @@ defmodule Liteskill.Chat do
       |> where([c], c.status != "archived")
 
     if search && search != "" do
-      term = "%#{String.replace(search, "%", "\\%")}%"
+      escaped =
+        search
+        |> String.replace("\\", "\\\\")
+        |> String.replace("%", "\\%")
+        |> String.replace("_", "\\_")
+
+      term = "%#{escaped}%"
       where(query, [c], ilike(c.title, ^term))
     else
       query

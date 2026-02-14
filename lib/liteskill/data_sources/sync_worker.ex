@@ -11,10 +11,18 @@ defmodule Liteskill.DataSources.SyncWorker do
   6. Update source sync_cursor, sync_status, last_synced_at
   """
 
-  use Oban.Worker, queue: :data_sync, max_attempts: 3
+  use Oban.Worker,
+    queue: :data_sync,
+    max_attempts: 3,
+    unique: [period: 300, fields: [:args], keys: [:source_id]]
 
   alias Liteskill.DataSources
   alias Liteskill.DataSources.{ConnectorRegistry, DocumentSyncWorker}
+
+  require Logger
+
+  # 10 MB max document content size
+  @max_content_bytes 10_485_760
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: args}) do
@@ -37,7 +45,7 @@ defmodule Liteskill.DataSources.SyncWorker do
 
         # coveralls-ignore-start
         {:error, reason} ->
-          DataSources.update_sync_status(source, "error", inspect(reason))
+          DataSources.update_sync_status(source, "error", sanitize_error(reason))
           {:error, reason}
           # coveralls-ignore-stop
       end
@@ -107,34 +115,47 @@ defmodule Liteskill.DataSources.SyncWorker do
       # Fetch full content from connector
       case connector.fetch_content(source, entry.external_id, opts) do
         {:ok, fetched} ->
-          attrs = %{
-            title: entry.title,
-            content_type: normalize_content_type(fetched.content_type),
-            metadata: entry.metadata,
-            content: fetched.content,
-            content_hash: fetched.content_hash
-          }
+          content_size = byte_size(fetched.content || "")
 
-          case DataSources.upsert_document_by_external_id(
-                 source.id,
-                 entry.external_id,
-                 attrs,
-                 user_id
-               ) do
-            {:ok, status, doc} when status in [:created, :updated] ->
-              if doc.content && doc.content != "" do
-                enqueue_document_sync(doc.id, source.name, user_id, "upsert", plug)
-              end
+          # coveralls-ignore-start
+          if content_size > @max_content_bytes do
+            Logger.warning(
+              "SyncWorker: skipping oversized document #{entry.external_id} " <>
+                "(#{content_size} bytes > #{@max_content_bytes} limit)"
+            )
 
-              :changed
+            :unchanged
+          else
+            # coveralls-ignore-stop
+            attrs = %{
+              title: entry.title,
+              content_type: normalize_content_type(fetched.content_type),
+              metadata: entry.metadata,
+              content: fetched.content,
+              content_hash: fetched.content_hash
+            }
 
-            # coveralls-ignore-start
-            {:ok, :unchanged, _doc} ->
-              :unchanged
+            case DataSources.upsert_document_by_external_id(
+                   source.id,
+                   entry.external_id,
+                   attrs,
+                   user_id
+                 ) do
+              {:ok, status, doc} when status in [:created, :updated] ->
+                if doc.content && doc.content != "" do
+                  enqueue_document_sync(doc.id, source.name, user_id, "upsert", plug)
+                end
 
-            {:error, _reason} ->
-              :error
-              # coveralls-ignore-stop
+                :changed
+
+              # coveralls-ignore-start
+              {:ok, :unchanged, _doc} ->
+                :unchanged
+
+              {:error, _reason} ->
+                :error
+                # coveralls-ignore-stop
+            end
           end
 
         # coveralls-ignore-start
@@ -153,6 +174,17 @@ defmodule Liteskill.DataSources.SyncWorker do
   defp normalize_content_type("application/json"), do: "text"
   defp normalize_content_type(type) when type in ["markdown", "text", "html"], do: type
   defp normalize_content_type(_), do: "text"
+  # coveralls-ignore-stop
+
+  # coveralls-ignore-start
+  # sanitize_error clauses are defensive — connector errors always come as maps/tuples
+  defp sanitize_error(reason) when is_binary(reason), do: String.slice(reason, 0, 500)
+  defp sanitize_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp sanitize_error(reason) do
+    reason |> inspect() |> String.slice(0, 500)
+  end
+
   # coveralls-ignore-stop
 
   defp enqueue_document_sync(document_id, source_name, user_id, action, plug) do

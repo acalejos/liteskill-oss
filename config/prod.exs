@@ -12,11 +12,7 @@ config :liteskill, LiteskillWeb.Endpoint, cache_static_manifest: "priv/static/ca
 # Note `:force_ssl` is required to be set at compile-time.
 unless System.get_env("FORCE_SSL") == "false" do
   config :liteskill, LiteskillWeb.Endpoint,
-    force_ssl: [rewrite_on: [:x_forwarded_proto]],
-    exclude: [
-      # paths: ["/health"],
-      hosts: ["localhost", "127.0.0.1"]
-    ]
+    force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true]
 end
 
 # Configure Swoosh API Client

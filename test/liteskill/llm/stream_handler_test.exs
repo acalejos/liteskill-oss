@@ -28,18 +28,58 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     %{user: user, conversation: conv}
   end
 
-  test "successful stream with completion", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      conn
-      |> Plug.Conn.send_resp(200, "")
-    end)
+  # -- Helper: build a stream_fn that returns text --
 
+  defp text_stream_fn(text) do
+    fn _model_id, _messages, on_chunk, _opts ->
+      Enum.each(String.graphemes(text), fn char -> on_chunk.(char) end)
+      {:ok, text, []}
+    end
+  end
+
+  defp text_chunks_stream_fn(chunks) do
+    fn _model_id, _messages, on_chunk, _opts ->
+      Enum.each(chunks, fn chunk -> on_chunk.(chunk) end)
+      full = Enum.join(chunks, "")
+      {:ok, full, []}
+    end
+  end
+
+  defp tool_call_stream_fn(text, tool_calls, opts \\ []) do
+    round_1_fn = Keyword.get(opts, :round_1_fn)
+
+    fn model_id, messages, on_chunk, call_opts ->
+      round = Process.get(:stream_fn_round, 0)
+      Process.put(:stream_fn_round, round + 1)
+
+      if round == 0 do
+        if text != "", do: on_chunk.(text)
+        {:ok, text, tool_calls}
+      else
+        r1 =
+          round_1_fn ||
+            fn _m, _ms, cb, _o ->
+              cb.("Done.")
+              {:ok, "Done.", []}
+            end
+
+        r1.(model_id, messages, on_chunk, call_opts)
+      end
+    end
+  end
+
+  defp error_stream_fn(error) do
+    fn _model_id, _messages, _on_chunk, _opts ->
+      {:error, error}
+    end
+  end
+
+  test "successful stream with completion", %{conversation: conv} do
     stream_id = conv.stream_id
-    messages = [%{role: :user, content: "test"}]
 
     assert :ok =
-             StreamHandler.handle_stream(stream_id, messages,
-               plug: {Req.Test, Liteskill.LLM.BedrockClient}
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               stream_fn: text_stream_fn("Hello!")
              )
 
     events = Store.read_stream_forward(stream_id)
@@ -50,10 +90,11 @@ defmodule Liteskill.LLM.StreamHandlerTest do
 
   test "stream request error records AssistantStreamFailed", %{conversation: conv} do
     stream_id = conv.stream_id
-    messages = [%{role: :user, content: "test"}]
 
-    # Without a Req.Test stub or valid config, the HTTP call will fail
-    _result = StreamHandler.handle_stream(stream_id, messages)
+    assert {:error, {"request_error", _}} =
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               stream_fn: error_stream_fn(%{body: "connection failed"})
+             )
 
     events = Store.read_stream_forward(stream_id)
     event_types = Enum.map(events, & &1.event_type)
@@ -70,79 +111,94 @@ defmodule Liteskill.LLM.StreamHandlerTest do
   end
 
   test "passes model_id option", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      conn |> Plug.Conn.send_resp(200, "")
-    end)
-
     stream_id = conv.stream_id
 
     StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
       model_id: "custom-model",
-      plug: {Req.Test, Liteskill.LLM.BedrockClient}
+      stream_fn: text_stream_fn("")
     )
 
     events = Store.read_stream_forward(stream_id)
-
-    started_events =
-      Enum.filter(events, &(&1.event_type == "AssistantStreamStarted"))
-
+    started_events = Enum.filter(events, &(&1.event_type == "AssistantStreamStarted"))
     last_started = List.last(started_events)
     assert last_started.data["model_id"] == "custom-model"
   end
 
-  test "passes system prompt option", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      conn |> Plug.Conn.send_resp(200, "")
-    end)
-
+  test "passes system prompt option via call_opts", %{conversation: conv} do
     stream_id = conv.stream_id
 
     assert :ok =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
                system: "Be brief",
-               plug: {Req.Test, Liteskill.LLM.BedrockClient}
+               stream_fn: fn _model, _msgs, _cb, opts ->
+                 assert Keyword.get(opts, :system_prompt) == "Be brief"
+                 {:ok, "", []}
+               end
              )
   end
 
-  test "stream completion records full_content and stop_reason", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      conn |> Plug.Conn.send_resp(200, "")
-    end)
-
+  test "passes temperature and max_tokens via call_opts", %{conversation: conv} do
     stream_id = conv.stream_id
 
     assert :ok =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-               plug: {Req.Test, Liteskill.LLM.BedrockClient}
+               temperature: 0.7,
+               max_tokens: 2048,
+               stream_fn: fn _model, _msgs, _cb, opts ->
+                 assert Keyword.get(opts, :temperature) == 0.7
+                 assert Keyword.get(opts, :max_tokens) == 2048
+                 {:ok, "", []}
+               end
+             )
+  end
+
+  test "empty tools list does not include tools in call_opts", %{conversation: conv} do
+    stream_id = conv.stream_id
+
+    assert :ok =
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               tools: [],
+               stream_fn: fn _model, _msgs, _cb, opts ->
+                 assert Keyword.get(opts, :tools) == nil
+                 {:ok, "", []}
+               end
+             )
+  end
+
+  test "stream completion records full_content and stop_reason", %{conversation: conv} do
+    stream_id = conv.stream_id
+
+    assert :ok =
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               stream_fn: text_stream_fn("response text")
              )
 
     events = Store.read_stream_forward(stream_id)
     completed = Enum.find(events, &(&1.event_type == "AssistantStreamCompleted"))
     assert completed != nil
-    assert completed.data["full_content"] == ""
+    assert completed.data["full_content"] == "response text"
     assert completed.data["stop_reason"] == "end_turn"
   end
 
   test "retries on 503 with backoff then succeeds", %{conversation: conv} do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
+    retry_fn = fn _model, _msgs, on_chunk, _opts ->
       count = Agent.get_and_update(counter, &{&1, &1 + 1})
 
       if count < 1 do
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(503, Jason.encode!(%{"message" => "unavailable"}))
+        {:error, %{status: 503, body: "unavailable"}}
       else
-        conn |> Plug.Conn.send_resp(200, "")
+        on_chunk.("ok")
+        {:ok, "ok", []}
       end
-    end)
+    end
 
     stream_id = conv.stream_id
 
     assert :ok =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-               plug: {Req.Test, Liteskill.LLM.BedrockClient},
+               stream_fn: retry_fn,
                backoff_ms: 1
              )
 
@@ -154,18 +210,11 @@ defmodule Liteskill.LLM.StreamHandlerTest do
   end
 
   test "fails after max retries exceeded", %{conversation: conv} do
-    # Always return 503 to exhaust retries
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      conn
-      |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.send_resp(429, Jason.encode!(%{"message" => "rate limited"}))
-    end)
-
     stream_id = conv.stream_id
 
     assert {:error, {"max_retries_exceeded", _}} =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-               plug: {Req.Test, Liteskill.LLM.BedrockClient},
+               stream_fn: error_stream_fn(%{status: 429, body: "rate limited"}),
                backoff_ms: 1
              )
 
@@ -177,21 +226,8 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     assert failed.data["error_type"] == "max_retries_exceeded"
   end
 
-  test "stream with tools option passes toolConfig in request body", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      decoded = Jason.decode!(body)
-
-      # Verify toolConfig is present
-      assert decoded["toolConfig"] != nil
-      assert decoded["toolConfig"]["tools"] != nil
-      assert length(decoded["toolConfig"]["tools"]) == 1
-
-      tool = hd(decoded["toolConfig"]["tools"])
-      assert tool["toolSpec"]["name"] == "get_weather"
-
-      conn |> Plug.Conn.send_resp(200, "")
-    end)
+  test "passes tools as ReqLLM.Tool structs in call_opts", %{conversation: conv} do
+    stream_id = conv.stream_id
 
     tools = [
       %{
@@ -203,23 +239,22 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       }
     ]
 
-    stream_id = conv.stream_id
-
     assert :ok =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-               plug: {Req.Test, Liteskill.LLM.BedrockClient},
-               tools: tools
+               tools: tools,
+               stream_fn: fn _model, _msgs, _cb, opts ->
+                 req_tools = Keyword.get(opts, :tools, [])
+                 assert length(req_tools) == 1
+                 assert %ReqLLM.Tool{} = hd(req_tools)
+                 assert hd(req_tools).name == "get_weather"
+                 {:ok, "", []}
+               end
              )
-
-    events = Store.read_stream_forward(stream_id)
-    event_types = Enum.map(events, & &1.event_type)
-    assert "AssistantStreamCompleted" in event_types
   end
 
   test "returns error when max tool rounds exceeded", %{conversation: conv} do
     stream_id = conv.stream_id
 
-    # Simulate being at the max tool round limit
     assert {:error, :max_tool_rounds_exceeded} =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
                tool_round: 10,
@@ -228,70 +263,46 @@ defmodule Liteskill.LLM.StreamHandlerTest do
   end
 
   test "allows stream when under max tool rounds", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      conn |> Plug.Conn.send_resp(200, "")
-    end)
-
     stream_id = conv.stream_id
 
     assert :ok =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
                tool_round: 5,
                max_tool_rounds: 10,
-               plug: {Req.Test, Liteskill.LLM.BedrockClient}
+               stream_fn: text_stream_fn("")
              )
   end
 
-  test "stream without tools does not include toolConfig", %{conversation: conv} do
-    Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      decoded = Jason.decode!(body)
-
-      # No toolConfig when no tools
-      assert decoded["toolConfig"] == nil
-
-      conn |> Plug.Conn.send_resp(200, "")
-    end)
+  test "omits api_key from provider_options when no bearer token configured", %{
+    conversation: conv
+  } do
+    Application.put_env(:liteskill, Liteskill.LLM,
+      bedrock_region: "us-east-1",
+      bedrock_model_id: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+    )
 
     stream_id = conv.stream_id
 
     assert :ok =
              StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-               plug: {Req.Test, Liteskill.LLM.BedrockClient}
+               stream_fn: fn _model, _msgs, _cb, opts ->
+                 provider_opts = Keyword.get(opts, :provider_options, [])
+                 refute Keyword.has_key?(provider_opts, :api_key)
+                 {:ok, "", []}
+               end
              )
   end
 
-  describe "parse_tool_calls/1" do
-    test "parses valid JSON input parts" do
-      tool_calls = [
-        %{
-          tool_use_id: "id1",
-          name: "get_weather",
-          input_parts: ["ation\":\"NYC\"}", "{\"loc"]
-        }
-      ]
+  test "stream without tools does not include tools in call_opts", %{conversation: conv} do
+    stream_id = conv.stream_id
 
-      result = StreamHandler.parse_tool_calls(tool_calls)
-      assert [%{tool_use_id: "id1", name: "get_weather", input: %{"location" => "NYC"}}] = result
-    end
-
-    test "returns empty map for invalid JSON" do
-      tool_calls = [
-        %{tool_use_id: "id1", name: "broken", input_parts: ["not json"]}
-      ]
-
-      result = StreamHandler.parse_tool_calls(tool_calls)
-      assert [%{input: %{}}] = result
-    end
-
-    test "handles empty input parts" do
-      tool_calls = [
-        %{tool_use_id: "id1", name: "noop", input_parts: []}
-      ]
-
-      result = StreamHandler.parse_tool_calls(tool_calls)
-      assert [%{input: %{}}] = result
-    end
+    assert :ok =
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               stream_fn: fn _model, _msgs, _cb, opts ->
+                 assert Keyword.get(opts, :tools) == nil
+                 {:ok, "", []}
+               end
+             )
   end
 
   describe "validate_tool_calls/2" do
@@ -352,48 +363,20 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     end
   end
 
-  describe "tool-calling path via FakeProvider" do
+  describe "tool-calling path" do
     setup %{conversation: conv} do
       on_exit(fn ->
-        Process.delete(:fake_provider_events)
-        Process.delete(:fake_provider_round)
-        Process.delete(:fake_provider_events_round_0)
-        Process.delete(:fake_provider_events_round_1)
+        Process.delete(:stream_fn_round)
         Process.delete(:fake_tool_results)
       end)
 
       %{stream_id: conv.stream_id}
     end
 
-    defp tool_call_events(tool_use_id, tool_name, input_json) do
-      [
-        {:content_block_delta,
-         %{"delta" => %{"text" => "Let me check that."}, "contentBlockIndex" => 0}},
-        {:content_block_start,
-         %{
-           "start" => %{
-             "toolUse" => %{"toolUseId" => tool_use_id, "name" => tool_name}
-           }
-         }},
-        {:content_block_delta, %{"delta" => %{"toolUse" => %{"input" => input_json}}}}
-      ]
-    end
-
-    defp text_only_events(text) do
-      [{:content_block_delta, %{"delta" => %{"text" => text}, "contentBlockIndex" => 0}}]
-    end
-
     test "auto_confirm executes tool and continues to next round", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      # Round 0: LLM returns a tool call
-      Process.put(
-        :fake_provider_events_round_0,
-        tool_call_events(tool_use_id, "get_weather", "{\"city\":\"NYC\"}")
-      )
-
-      # Round 1: LLM returns text only (no more tool calls)
-      Process.put(:fake_provider_events_round_1, text_only_events("The weather is sunny."))
+      tool_calls = [%{tool_use_id: tool_use_id, name: "get_weather", input: %{"city" => "NYC"}}]
 
       tools = [
         %{"toolSpec" => %{"name" => "get_weather", "description" => "Get weather"}}
@@ -403,7 +386,7 @@ defmodule Liteskill.LLM.StreamHandlerTest do
                StreamHandler.handle_stream(
                  stream_id,
                  [%{role: :user, content: "What's the weather?"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: tool_call_stream_fn("Let me check that.", tool_calls),
                  tools: tools,
                  tool_servers: %{"get_weather" => %{builtin: Liteskill.LLM.FakeToolServer}},
                  auto_confirm: true
@@ -412,14 +395,11 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       events = Store.read_stream_forward(stream_id)
       event_types = Enum.map(events, & &1.event_type)
 
-      # Should have: started, chunks, tool_call_started, tool_call_completed,
-      # completed (tool_use), started (round 2), chunks, completed (end_turn)
       assert "ToolCallStarted" in event_types
       assert "ToolCallCompleted" in event_types
       assert Enum.count(event_types, &(&1 == "AssistantStreamStarted")) == 2
       assert Enum.count(event_types, &(&1 == "AssistantStreamCompleted")) == 2
 
-      # First completion should have stop_reason="tool_use"
       completions = Enum.filter(events, &(&1.event_type == "AssistantStreamCompleted"))
       assert hd(completions).data["stop_reason"] == "tool_use"
       assert List.last(completions).data["stop_reason"] == "end_turn"
@@ -428,12 +408,7 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     test "auto_confirm records tool call with correct input and output", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      Process.put(
-        :fake_provider_events_round_0,
-        tool_call_events(tool_use_id, "search", "{\"q\":\"elixir\"}")
-      )
-
-      Process.put(:fake_provider_events_round_1, text_only_events("Found results."))
+      tool_calls = [%{tool_use_id: tool_use_id, name: "search", input: %{"q" => "elixir"}}]
 
       Process.put(:fake_tool_results, %{
         "search" => {:ok, %{"content" => [%{"text" => "Elixir is great"}]}}
@@ -443,7 +418,7 @@ defmodule Liteskill.LLM.StreamHandlerTest do
 
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "search"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: tool_call_stream_fn("Let me search.", tool_calls),
                  tools: tools,
                  tool_servers: %{"search" => %{builtin: Liteskill.LLM.FakeToolServer}},
                  auto_confirm: true
@@ -463,19 +438,13 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     test "filters out tool calls not in allowed tools list", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      # LLM tries to call "forbidden_tool" which isn't in our tools list
-      Process.put(:fake_provider_events, [
-        {:content_block_start,
-         %{"start" => %{"toolUse" => %{"toolUseId" => tool_use_id, "name" => "forbidden_tool"}}}},
-        {:content_block_delta, %{"delta" => %{"toolUse" => %{"input" => "{}"}}}}
-      ])
+      tool_calls = [%{tool_use_id: tool_use_id, name: "forbidden_tool", input: %{}}]
 
-      # Only "allowed_tool" is in the tools list
       tools = [%{"toolSpec" => %{"name" => "allowed_tool", "description" => "ok"}}]
 
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: fn _m, _ms, _cb, _o -> {:ok, "", tool_calls} end,
                  tools: tools,
                  auto_confirm: true
                )
@@ -483,28 +452,21 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       events = Store.read_stream_forward(stream_id)
       event_types = Enum.map(events, & &1.event_type)
 
-      # No tool call events since the tool was filtered out
       refute "ToolCallStarted" in event_types
-      # Stream completes with end_turn (no valid tool calls to process)
       assert "AssistantStreamCompleted" in event_types
     end
 
     test "handles tool execution error", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      Process.put(
-        :fake_provider_events_round_0,
-        tool_call_events(tool_use_id, "failing_tool", "{}")
-      )
-
-      Process.put(:fake_provider_events_round_1, text_only_events("Tool failed."))
+      tool_calls = [%{tool_use_id: tool_use_id, name: "failing_tool", input: %{}}]
       Process.put(:fake_tool_results, %{"failing_tool" => {:error, "connection timeout"}})
 
       tools = [%{"toolSpec" => %{"name" => "failing_tool", "description" => "Fails"}}]
 
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: tool_call_stream_fn("", tool_calls),
                  tools: tools,
                  tool_servers: %{"failing_tool" => %{builtin: Liteskill.LLM.FakeToolServer}},
                  auto_confirm: true
@@ -513,45 +475,38 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       events = Store.read_stream_forward(stream_id)
 
       tc_completed = Enum.find(events, &(&1.event_type == "ToolCallCompleted"))
-      assert tc_completed.data["output"]["error"] =~ "connection timeout"
+      assert tc_completed.data["output"]["error"] == "tool execution failed"
     end
 
     test "tool server nil returns error for unconfigured tool", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      Process.put(
-        :fake_provider_events_round_0,
-        tool_call_events(tool_use_id, "no_server_tool", "{}")
-      )
-
-      Process.put(:fake_provider_events_round_1, text_only_events("Done."))
+      tool_calls = [%{tool_use_id: tool_use_id, name: "no_server_tool", input: %{}}]
 
       tools = [%{"toolSpec" => %{"name" => "no_server_tool", "description" => "No server"}}]
 
-      # No tool_servers configured — server will be nil
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: tool_call_stream_fn("", tool_calls),
                  tools: tools,
                  auto_confirm: true
                )
 
       events = Store.read_stream_forward(stream_id)
       tc_completed = Enum.find(events, &(&1.event_type == "ToolCallCompleted"))
-      assert tc_completed.data["output"]["error"] =~ "No server configured"
+      assert tc_completed.data["output"]["error"] == "tool execution failed"
     end
 
     test "manual confirm rejects tool calls on timeout", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      Process.put(:fake_provider_events_round_0, tool_call_events(tool_use_id, "slow_tool", "{}"))
-      Process.put(:fake_provider_events_round_1, text_only_events("Rejected."))
+      tool_calls = [%{tool_use_id: tool_use_id, name: "slow_tool", input: %{}}]
 
       tools = [%{"toolSpec" => %{"name" => "slow_tool", "description" => "Slow"}}]
 
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: tool_call_stream_fn("", tool_calls),
                  tools: tools,
                  auto_confirm: false,
                  tool_approval_timeout_ms: 1
@@ -566,21 +521,14 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     test "manual confirm approves tool call via PubSub", %{stream_id: stream_id} do
       tool_use_id = "toolu_#{System.unique_integer([:positive])}"
 
-      Process.put(
-        :fake_provider_events_round_0,
-        tool_call_events(tool_use_id, "approved_tool", "{}")
-      )
-
-      Process.put(:fake_provider_events_round_1, text_only_events("Approved and done."))
+      tool_calls = [%{tool_use_id: tool_use_id, name: "approved_tool", input: %{}}]
 
       tools = [%{"toolSpec" => %{"name" => "approved_tool", "description" => "Will be approved"}}]
 
-      # Send approval after a short delay
       approval_topic = "tool_approval:#{stream_id}"
       test_pid = self()
 
       spawn(fn ->
-        # Wait for the subscription to be established
         Process.sleep(50)
 
         Phoenix.PubSub.broadcast(
@@ -594,7 +542,7 @@ defmodule Liteskill.LLM.StreamHandlerTest do
 
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-                 provider: Liteskill.LLM.FakeProvider,
+                 stream_fn: tool_call_stream_fn("", tool_calls),
                  tools: tools,
                  tool_servers: %{"approved_tool" => %{builtin: Liteskill.LLM.FakeToolServer}},
                  auto_confirm: false,
@@ -610,19 +558,13 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       assert "ToolCallCompleted" in event_types
 
       tc_completed = Enum.find(events, &(&1.event_type == "ToolCallCompleted"))
-      # Should have actual tool output, not rejection
       refute tc_completed.data["output"]["error"]
     end
 
-    test "records text chunks via content_block_delta", %{stream_id: stream_id} do
-      Process.put(:fake_provider_events, [
-        {:content_block_delta, %{"delta" => %{"text" => "Hello "}, "contentBlockIndex" => 0}},
-        {:content_block_delta, %{"delta" => %{"text" => "world!"}, "contentBlockIndex" => 0}}
-      ])
-
+    test "records text chunks via on_text_chunk callback", %{stream_id: stream_id} do
       assert :ok =
                StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
-                 provider: Liteskill.LLM.FakeProvider
+                 stream_fn: text_chunks_stream_fn(["Hello ", "world!"])
                )
 
       events = Store.read_stream_forward(stream_id)
@@ -663,9 +605,170 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       assert result == "42"
     end
 
-    test "formats error tuple" do
+    test "formats error tuple with sanitized message" do
       result = StreamHandler.format_tool_output({:error, "timeout"})
-      assert result == "Error: \"timeout\""
+      assert result == "Error: tool execution failed"
+    end
+  end
+
+  describe "to_req_llm_model/1" do
+    test "returns map-based model spec with amazon_bedrock provider" do
+      assert StreamHandler.to_req_llm_model("us.anthropic.claude-3-5-sonnet-20241022-v2:0") ==
+               %{id: "us.anthropic.claude-3-5-sonnet-20241022-v2:0", provider: :amazon_bedrock}
+    end
+
+    test "works with any model id" do
+      assert StreamHandler.to_req_llm_model("custom-model") ==
+               %{id: "custom-model", provider: :amazon_bedrock}
+    end
+  end
+
+  describe "to_req_llm_context/1" do
+    test "converts atom-key user message" do
+      ctx = StreamHandler.to_req_llm_context([%{role: :user, content: "Hello"}])
+      assert %ReqLLM.Context{} = ctx
+      assert length(ctx.messages) == 1
+      assert hd(ctx.messages).role == :user
+    end
+
+    test "converts atom-key assistant message" do
+      ctx = StreamHandler.to_req_llm_context([%{role: :assistant, content: "Hi"}])
+      assert %ReqLLM.Context{} = ctx
+      assert hd(ctx.messages).role == :assistant
+    end
+
+    test "converts string-key user text blocks" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{"role" => "user", "content" => [%{"text" => "Hello world"}]}
+        ])
+
+      assert %ReqLLM.Context{} = ctx
+      assert length(ctx.messages) == 1
+      assert hd(ctx.messages).role == :user
+    end
+
+    test "converts string-key simple text content" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{"role" => "user", "content" => "plain text"},
+          %{"role" => "assistant", "content" => "response"}
+        ])
+
+      assert length(ctx.messages) == 2
+    end
+
+    test "converts string-key assistant with toolUse blocks" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{
+            "role" => "assistant",
+            "content" => [
+              %{"text" => "Let me search."},
+              %{
+                "toolUse" => %{
+                  "toolUseId" => "tc-1",
+                  "name" => "search",
+                  "input" => %{"q" => "test"}
+                }
+              }
+            ]
+          }
+        ])
+
+      assert %ReqLLM.Context{} = ctx
+      msg = hd(ctx.messages)
+      assert msg.role == :assistant
+    end
+
+    test "converts string-key assistant without toolUse blocks" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{"role" => "assistant", "content" => [%{"text" => "Just text"}]}
+        ])
+
+      assert hd(ctx.messages).role == :assistant
+    end
+
+    test "converts string-key user toolResult blocks" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{
+            "role" => "user",
+            "content" => [
+              %{
+                "toolResult" => %{
+                  "toolUseId" => "tc-1",
+                  "content" => [%{"text" => "Result text"}],
+                  "status" => "success"
+                }
+              }
+            ]
+          }
+        ])
+
+      assert %ReqLLM.Context{} = ctx
+      msg = hd(ctx.messages)
+      assert msg.role == :tool
+    end
+
+    test "converts toolResult with non-text content" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{
+            "role" => "user",
+            "content" => [
+              %{
+                "toolResult" => %{
+                  "toolUseId" => "tc-1",
+                  "content" => [%{"image" => "data"}],
+                  "status" => "success"
+                }
+              }
+            ]
+          }
+        ])
+
+      assert length(ctx.messages) == 1
+    end
+
+    test "converts toolResult with missing content" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{
+            "role" => "user",
+            "content" => [
+              %{
+                "toolResult" => %{
+                  "toolUseId" => "tc-1",
+                  "status" => "success"
+                }
+              }
+            ]
+          }
+        ])
+
+      assert length(ctx.messages) == 1
+    end
+
+    test "handles assistant toolUse with nil input" do
+      ctx =
+        StreamHandler.to_req_llm_context([
+          %{
+            "role" => "assistant",
+            "content" => [
+              %{
+                "toolUse" => %{
+                  "toolUseId" => "tc-1",
+                  "name" => "tool",
+                  "input" => nil
+                }
+              }
+            ]
+          }
+        ])
+
+      assert length(ctx.messages) == 1
     end
   end
 end

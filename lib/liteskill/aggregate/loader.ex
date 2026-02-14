@@ -131,7 +131,6 @@ defmodule Liteskill.Aggregate.Loader do
 
   # Atom fields (like :status) lose their type through JSONB round-trip.
   # Convert known string values back to atoms.
-  @atom_status_values ~w(created active streaming archived)a
   defp restore_atom_fields(%{status: status} = map) when is_binary(status) do
     atom =
       try do
@@ -141,7 +140,7 @@ defmodule Liteskill.Aggregate.Loader do
         ArgumentError -> status
       end
 
-    if atom in @atom_status_values do
+    if atom in Liteskill.Chat.ConversationAggregate.valid_statuses() do
       %{map | status: atom}
     else
       # coveralls-ignore-next-line

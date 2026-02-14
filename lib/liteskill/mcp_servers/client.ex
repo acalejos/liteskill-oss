@@ -75,6 +75,21 @@ defmodule Liteskill.McpServers.Client do
     end
   end
 
+  @blocked_headers MapSet.new([
+                     "authorization",
+                     "host",
+                     "content-type",
+                     "content-length",
+                     "transfer-encoding",
+                     "connection",
+                     "cookie",
+                     "set-cookie",
+                     "x-forwarded-for",
+                     "x-forwarded-host",
+                     "x-forwarded-proto",
+                     "proxy-authorization"
+                   ])
+
   defp build_headers(server) do
     base =
       if server.api_key && server.api_key != "" do
@@ -85,12 +100,25 @@ defmodule Liteskill.McpServers.Client do
 
     custom =
       case server.headers do
-        nil -> []
-        h when h == %{} -> []
-        h when is_map(h) -> Enum.map(h, fn {k, v} -> {k, v} end)
+        nil ->
+          []
+
+        h when h == %{} ->
+          []
+
+        h when is_map(h) ->
+          h
+          |> Enum.map(fn {k, v} -> {String.downcase(to_string(k)), to_string(v)} end)
+          |> Enum.reject(fn {k, v} ->
+            MapSet.member?(@blocked_headers, k) or has_control_chars?(k) or has_control_chars?(v)
+          end)
       end
 
     [{"content-type", "application/json"}, {"accept", "application/json, text/event-stream"}] ++
       base ++ custom
+  end
+
+  defp has_control_chars?(str) do
+    String.contains?(str, ["\r", "\n", "\0"])
   end
 end

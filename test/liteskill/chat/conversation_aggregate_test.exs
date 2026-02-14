@@ -13,6 +13,17 @@ defmodule Liteskill.Chat.ConversationAggregateTest do
     end
   end
 
+  describe "valid_statuses/0" do
+    test "returns all valid status atoms" do
+      statuses = ConversationAggregate.valid_statuses()
+      assert :created in statuses
+      assert :active in statuses
+      assert :streaming in statuses
+      assert :archived in statuses
+      assert length(statuses) == 4
+    end
+  end
+
   describe "create_conversation" do
     test "transitions from :created to :active" do
       state = ConversationAggregate.init()

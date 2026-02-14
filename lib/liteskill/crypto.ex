@@ -46,6 +46,15 @@ defmodule Liteskill.Crypto do
     end
   end
 
+  @doc """
+  Validates that the encryption key is configured. Call at application boot
+  to fail fast instead of crashing on first encrypt/decrypt.
+  """
+  def validate_key! do
+    encryption_key()
+    :ok
+  end
+
   defp encryption_key do
     # coveralls-ignore-start
     key_source =

@@ -270,6 +270,104 @@ defmodule Liteskill.McpServers.ClientTest do
       Client.list_tools(server, plug: {Req.Test, Liteskill.McpServers.Client})
     end
 
+    test "strips blocked headers from custom headers" do
+      server =
+        build_server(%{
+          headers: %{
+            "Authorization" => "evil-override",
+            "X-Forwarded-For" => "1.2.3.4",
+            "X-Custom-Safe" => "allowed-value",
+            "Cookie" => "session=stolen",
+            "x-another-safe" => "fine"
+          }
+        })
+
+      Req.Test.stub(Liteskill.McpServers.Client, fn conn ->
+        header_names = Enum.map(conn.req_headers, fn {k, _} -> k end)
+
+        # Blocked headers must not be present (beyond the base authorization from api_key)
+        refute "x-forwarded-for" in header_names
+        refute "cookie" in header_names
+
+        # Safe custom headers should be present
+        custom_safe =
+          Enum.find(conn.req_headers, fn {k, _} -> k == "x-custom-safe" end)
+
+        assert custom_safe == {"x-custom-safe", "allowed-value"}
+
+        another_safe =
+          Enum.find(conn.req_headers, fn {k, _} -> k == "x-another-safe" end)
+
+        assert another_safe == {"x-another-safe", "fine"}
+
+        resp = %{"jsonrpc" => "2.0", "result" => %{"tools" => []}, "id" => 1}
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+      end)
+
+      assert {:ok, []} =
+               Client.list_tools(server, plug: {Req.Test, Liteskill.McpServers.Client})
+    end
+
+    test "strips headers with CRLF injection in values" do
+      server =
+        build_server(%{
+          headers: %{
+            "X-Safe" => "safe-value",
+            "X-Injected" => "value\r\nX-Evil: injected",
+            "X-Null" => "val\0ue"
+          }
+        })
+
+      Req.Test.stub(Liteskill.McpServers.Client, fn conn ->
+        header_names = Enum.map(conn.req_headers, fn {k, _} -> k end)
+
+        # Safe header should be present
+        assert "x-safe" in header_names
+
+        # CRLF-injected and null-byte headers should be stripped
+        refute "x-injected" in header_names
+        refute "x-null" in header_names
+
+        resp = %{"jsonrpc" => "2.0", "result" => %{"tools" => []}, "id" => 1}
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+      end)
+
+      assert {:ok, []} =
+               Client.list_tools(server, plug: {Req.Test, Liteskill.McpServers.Client})
+    end
+
+    test "strips headers with CRLF injection in keys" do
+      server =
+        build_server(%{
+          headers: %{
+            "X-Good" => "good",
+            "X-Bad\r\nEvil" => "value"
+          }
+        })
+
+      Req.Test.stub(Liteskill.McpServers.Client, fn conn ->
+        header_names = Enum.map(conn.req_headers, fn {k, _} -> k end)
+
+        assert "x-good" in header_names
+        refute Enum.any?(header_names, &String.contains?(&1, "evil"))
+
+        resp = %{"jsonrpc" => "2.0", "result" => %{"tools" => []}, "id" => 1}
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+      end)
+
+      assert {:ok, []} =
+               Client.list_tools(server, plug: {Req.Test, Liteskill.McpServers.Client})
+    end
+
     test "handles nil headers" do
       server = build_server(%{headers: nil})
 

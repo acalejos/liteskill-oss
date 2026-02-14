@@ -759,6 +759,77 @@ defmodule Liteskill.Chat.ProjectorTest do
     assert conv.status == "active"
   end
 
+  test "emits telemetry on projection failure", %{user: user} do
+    {stream_id, _conversation_id} = create_conversation(user)
+
+    test_pid = self()
+    ref = make_ref()
+
+    :telemetry.attach(
+      "test-projector-failure-#{inspect(ref)}",
+      [:liteskill, :projector, :event_failed],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry_event, measurements, metadata})
+      end,
+      nil
+    )
+
+    # AssistantChunkReceived with non-UUID message_id will raise Ecto.Query.CastError
+    bad_event = %Liteskill.EventStore.Event{
+      stream_id: stream_id,
+      stream_version: 999,
+      event_type: "AssistantChunkReceived",
+      data: %{
+        "message_id" => "not-a-valid-uuid",
+        "chunk_index" => 0,
+        "delta_text" => "will fail"
+      },
+      metadata: %{}
+    }
+
+    # The projector should not crash — it logs and emits telemetry
+    Projector.project_events(stream_id, [bad_event])
+
+    assert_receive {:telemetry_event, %{count: 1},
+                    %{stream_id: ^stream_id, event_type: "AssistantChunkReceived"}},
+                   1000
+
+    :telemetry.detach("test-projector-failure-#{inspect(ref)}")
+  end
+
+  test "emits telemetry when conversation not found for stream" do
+    test_pid = self()
+    ref = make_ref()
+
+    :telemetry.attach(
+      "test-projector-conv-not-found-#{inspect(ref)}",
+      [:liteskill, :projector, :conversation_not_found],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry_not_found, measurements, metadata})
+      end,
+      nil
+    )
+
+    fake_stream_id = "conversation-#{Ecto.UUID.generate()}"
+
+    event = %Liteskill.EventStore.Event{
+      stream_id: fake_stream_id,
+      stream_version: 1,
+      event_type: "UserMessageAdded",
+      data: %{
+        "message_id" => Ecto.UUID.generate(),
+        "content" => "orphaned"
+      },
+      metadata: %{}
+    }
+
+    Projector.project_events(fake_stream_id, [event])
+
+    assert_receive {:telemetry_not_found, %{count: 1}, %{stream_id: ^fake_stream_id}}, 1000
+
+    :telemetry.detach("test-projector-conv-not-found-#{inspect(ref)}")
+  end
+
   defp create_conversation(user) do
     conversation_id = Ecto.UUID.generate()
     stream_id = "conversation-#{conversation_id}"

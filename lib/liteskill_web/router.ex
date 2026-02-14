@@ -14,6 +14,7 @@ defmodule LiteskillWeb.Router do
     plug :accepts, ["json"]
     plug :fetch_session
     plug LiteskillWeb.Plugs.Auth, :fetch_current_user
+    plug LiteskillWeb.Plugs.RateLimiter, limit: 1000, window_ms: 60_000
   end
 
   pipeline :require_auth do

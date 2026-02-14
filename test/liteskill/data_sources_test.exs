@@ -283,20 +283,16 @@ defmodule Liteskill.DataSourcesTest do
       assert DataSources.document_count(source.id) == 0
     end
 
-    test "admin can delete another user's source", %{owner: owner, other: other} do
+    test "non-owner cannot delete another user's source", %{owner: owner, other: other} do
       {:ok, source} =
         DataSources.create_source(%{name: "Other's Source", source_type: "manual"}, other.id)
 
-      {:ok, _} = DataSources.create_document(source.id, %{title: "Doc"}, other.id)
-
-      assert {:ok, _} = DataSources.delete_source(source.id, owner.id, is_admin: true)
-      assert {:error, :not_found} = DataSources.get_source(source.id, other.id)
-      assert DataSources.document_count(source.id) == 0
+      assert {:error, :not_found} = DataSources.delete_source(source.id, owner.id)
     end
 
-    test "admin cannot delete builtin source", %{owner: owner} do
+    test "cannot delete builtin source", %{owner: owner} do
       assert {:error, :cannot_delete_builtin} =
-               DataSources.delete_source("builtin:wiki", owner.id, is_admin: true)
+               DataSources.delete_source("builtin:wiki", owner.id)
     end
 
     test "returns :not_found for nonexistent source", %{owner: owner} do

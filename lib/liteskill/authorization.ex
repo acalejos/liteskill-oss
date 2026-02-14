@@ -12,13 +12,11 @@ defmodule Liteskill.Authorization do
   - **owner**: full control (delete, demote anyone, transfer ownership)
   """
 
-  alias Liteskill.Authorization.EntityAcl
+  alias Liteskill.Authorization.{EntityAcl, Roles}
   alias Liteskill.Groups.GroupMembership
   alias Liteskill.Repo
 
   import Ecto.Query
-
-  @role_rank %{"viewer" => 0, "editor" => 1, "manager" => 2, "owner" => 3}
 
   # --- Access Checks ---
 
@@ -58,7 +56,7 @@ defmodule Liteskill.Authorization do
 
     case roles do
       [] -> {:error, :no_access}
-      roles -> {:ok, highest_role(roles)}
+      roles -> {:ok, Roles.highest(roles)}
     end
   end
 
@@ -249,6 +247,32 @@ defmodule Liteskill.Authorization do
     from(e in subquery(union_all(direct, ^group)), select: e.entity_id)
   end
 
+  # --- Ownership Verification ---
+
+  @schema_map %{
+    "conversation" => Liteskill.Chat.Conversation,
+    "mcp_server" => Liteskill.McpServers.McpServer,
+    "data_source" => Liteskill.DataSources.Source,
+    "wiki_space" => Liteskill.DataSources.Document
+  }
+
+  @doc """
+  Verifies that the user owns the given entity by checking the `user_id` field.
+  Returns `:ok` if user owns it, `:error` otherwise.
+  """
+  def verify_ownership(entity_type, entity_id, user_id) do
+    case Map.get(@schema_map, entity_type) do
+      nil ->
+        :error
+
+      schema ->
+        case Repo.get(schema, entity_id) do
+          %{user_id: ^user_id} -> :ok
+          _ -> :error
+        end
+    end
+  end
+
   # --- Private Helpers ---
 
   defp get_user_acl(entity_type, entity_id, user_id) do
@@ -294,8 +318,4 @@ defmodule Liteskill.Authorization do
   defp can_revoke?(revoker_role, _target_role) when revoker_role in ["owner", "manager"], do: true
   # coveralls-ignore-next-line
   defp can_revoke?(_, _), do: false
-
-  defp highest_role(roles) do
-    Enum.max_by(roles, &Map.get(@role_rank, &1, -1))
-  end
 end

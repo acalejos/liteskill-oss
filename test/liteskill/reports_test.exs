@@ -25,6 +25,21 @@ defmodule Liteskill.ReportsTest do
     %{owner: owner, other: other}
   end
 
+  describe "address_comments_system_prompt/0" do
+    test "returns a non-empty string" do
+      prompt = Reports.address_comments_system_prompt()
+      assert is_binary(prompt)
+      assert String.length(prompt) > 0
+    end
+
+    test "mentions report tools" do
+      prompt = Reports.address_comments_system_prompt()
+      assert prompt =~ "reports__get"
+      assert prompt =~ "reports__modify_sections"
+      assert prompt =~ "reports__comment"
+    end
+  end
+
   describe "create_report/2" do
     test "creates report with owner ACL", %{owner: owner} do
       assert {:ok, report} = Reports.create_report(owner.id, "My Report")

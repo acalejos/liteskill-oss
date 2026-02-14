@@ -630,9 +630,13 @@ defmodule LiteskillWeb.ProfileLive do
   end
 
   def handle_event("create_group", %{"name" => name}, socket) do
-    user_id = socket.assigns.current_user.id
-    Groups.create_group(name, user_id)
-    {:noreply, Phoenix.Component.assign(socket, profile_groups: Groups.list_all_groups())}
+    if User.admin?(socket.assigns.current_user) do
+      user_id = socket.assigns.current_user.id
+      Groups.create_group(name, user_id)
+      {:noreply, Phoenix.Component.assign(socket, profile_groups: Groups.list_all_groups())}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_event("admin_delete_group", %{"id" => id}, socket) do
@@ -653,13 +657,19 @@ defmodule LiteskillWeb.ProfileLive do
   end
 
   def handle_event("view_group", %{"id" => id}, socket) do
-    case Groups.admin_get_group(id) do
-      {:ok, group} ->
-        members = Groups.admin_list_members(id)
-        {:noreply, Phoenix.Component.assign(socket, group_detail: group, group_members: members)}
+    if User.admin?(socket.assigns.current_user) do
+      case Groups.admin_get_group(id) do
+        {:ok, group} ->
+          members = Groups.admin_list_members(id)
 
-      {:error, _} ->
-        {:noreply, socket}
+          {:noreply,
+           Phoenix.Component.assign(socket, group_detail: group, group_members: members)}
+
+        {:error, _} ->
+          {:noreply, socket}
+      end
+    else
+      {:noreply, socket}
     end
   end
 

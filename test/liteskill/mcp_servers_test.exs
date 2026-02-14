@@ -361,6 +361,48 @@ defmodule Liteskill.McpServersTest do
     end
   end
 
+  describe "headers encryption" do
+    test "headers are stored encrypted in the database", %{owner: owner} do
+      {:ok, server} =
+        McpServers.create_server(%{
+          name: "Encrypted Headers",
+          url: "https://enc.example.com",
+          user_id: owner.id,
+          headers: %{"Authorization" => "Bearer secret-token"}
+        })
+
+      # Read the raw database value
+      raw =
+        Liteskill.Repo.one!(
+          from s in "mcp_servers",
+            where: s.id == type(^server.id, :binary_id),
+            select: s.headers
+        )
+
+      # Raw DB value should be encrypted (base64), not plaintext JSON
+      assert raw != nil
+      refute raw =~ "secret-token"
+      assert {:ok, _} = Base.decode64(raw)
+
+      # But the Ecto schema should decrypt it transparently
+      reloaded = Liteskill.Repo.get!(McpServer, server.id)
+      assert reloaded.headers == %{"Authorization" => "Bearer secret-token"}
+    end
+
+    test "empty headers round-trip correctly", %{owner: owner} do
+      {:ok, server} =
+        McpServers.create_server(%{
+          name: "No Headers",
+          url: "https://noheaders.example.com",
+          user_id: owner.id,
+          headers: %{}
+        })
+
+      reloaded = Liteskill.Repo.get!(McpServer, server.id)
+      assert reloaded.headers in [nil, %{}]
+    end
+  end
+
   describe "changeset/2" do
     test "validates status inclusion" do
       changeset =
@@ -373,6 +415,137 @@ defmodule Liteskill.McpServersTest do
 
       refute changeset.valid?
       assert errors_on(changeset)[:status]
+    end
+
+    test "accepts valid HTTPS URL" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://mcp.example.com/api",
+          user_id: Ecto.UUID.generate()
+        })
+
+      assert changeset.valid?
+    end
+
+    test "rejects localhost URL (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://localhost:3000",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects 127.x.x.x URLs (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://127.0.0.1:8080",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects 10.x private network URLs (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://10.0.0.1/api",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects 172.16-31.x private network URLs (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://172.16.0.1/api",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects 192.168.x private network URLs (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://192.168.1.1/api",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects AWS metadata URL (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://169.254.169.254/latest/meta-data",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects IPv6 loopback (SSRF protection)" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "https://[::1]:8080",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects plain HTTP URL" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "http://mcp.example.com:3000",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects invalid URL without scheme" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "not-a-url",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+
+    test "rejects URL with non-HTTP scheme" do
+      changeset =
+        McpServer.changeset(%McpServer{}, %{
+          name: "S",
+          url: "ftp://files.example.com",
+          user_id: Ecto.UUID.generate()
+        })
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
     end
   end
 end
