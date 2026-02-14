@@ -61,14 +61,17 @@ defmodule Liteskill.Settings do
   end
 
   defp load_from_db do
-    case Repo.one(from s in ServerSettings, order_by: [asc: s.id], limit: 1) do
+    case Repo.one(from s in ServerSettings, limit: 1) do
       nil ->
         %ServerSettings{}
         |> ServerSettings.changeset(%{registration_open: true})
-        |> Repo.insert!(on_conflict: :nothing)
+        |> Repo.insert!(
+          on_conflict: :nothing,
+          conflict_target: [:singleton]
+        )
 
         # Re-query to handle race: another process may have inserted first
-        Repo.one!(from s in ServerSettings, order_by: [asc: s.id], limit: 1)
+        Repo.one!(from s in ServerSettings, limit: 1)
 
       settings ->
         settings

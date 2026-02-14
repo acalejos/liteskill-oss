@@ -216,41 +216,57 @@ defmodule Liteskill.Accounts do
   and marks the invitation as used.
   """
   def accept_invitation(token, attrs) do
-    case get_invitation_by_token(token) do
-      nil ->
-        {:error, :not_found}
+    Repo.transaction(fn ->
+      # Lock the invitation row to prevent concurrent acceptance
+      invitation =
+        Repo.one(
+          from i in Invitation,
+            where: i.token == ^token,
+            lock: "FOR UPDATE"
+        )
 
-      invitation ->
-        cond do
-          Invitation.used?(invitation) ->
-            {:error, :already_used}
+      case invitation do
+        nil ->
+          Repo.rollback(:not_found)
 
-          Invitation.expired?(invitation) ->
-            {:error, :expired}
+        inv ->
+          cond do
+            Invitation.used?(inv) ->
+              Repo.rollback(:already_used)
 
-          true ->
-            user_attrs = %{
-              email: invitation.email,
-              name: attrs[:name] || attrs["name"],
-              password: attrs[:password] || attrs["password"]
-            }
+            Invitation.expired?(inv) ->
+              Repo.rollback(:expired)
 
-            Repo.transaction(fn ->
+            true ->
+              user_attrs = %{
+                email: inv.email,
+                name: attrs[:name] || attrs["name"],
+                password: attrs[:password] || attrs["password"]
+              }
+
               case register_user(user_attrs) do
                 {:ok, user} ->
-                  invitation
-                  |> Ecto.Changeset.change(%{
-                    used_at: DateTime.utc_now() |> DateTime.truncate(:second)
-                  })
-                  |> Repo.update!()
+                  {1, _} =
+                    Repo.update_all(
+                      from(i in Invitation,
+                        where: i.id == ^inv.id and is_nil(i.used_at)
+                      ),
+                      set: [
+                        used_at: DateTime.utc_now() |> DateTime.truncate(:second)
+                      ]
+                    )
 
                   user
 
                 {:error, changeset} ->
                   Repo.rollback(changeset)
               end
-            end)
-        end
+          end
+      end
+    end)
+    |> case do
+      {:ok, user} -> {:ok, user}
+      {:error, reason} -> {:error, reason}
     end
   end
 

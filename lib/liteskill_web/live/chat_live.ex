@@ -1711,25 +1711,12 @@ defmodule LiteskillWeb.ChatLive do
                       <.icon name="hero-stop-micro" class="size-5" />
                     </button>
                   </.form>
-                  <div
-                    :if={@available_llm_models != []}
-                    class="flex items-center gap-1 mt-1 px-1"
-                  >
-                    <.icon name="hero-cpu-chip-micro" class="size-3 text-base-content/40" />
-                    <form phx-change="select_llm_model">
-                      <select
-                        id="model-picker-conversation"
-                        name="model_id"
-                        class="select select-ghost select-xs text-xs text-base-content/50 hover:text-base-content/70 min-h-0 h-6 pl-0"
-                      >
-                        <%= for m <- @available_llm_models do %>
-                          <option value={m.id} selected={m.id == @selected_llm_model_id}>
-                            {m.name}
-                          </option>
-                        <% end %>
-                      </select>
-                    </form>
-                  </div>
+                  <.model_picker
+                    id="model-picker-conversation"
+                    class="mt-1"
+                    available_llm_models={@available_llm_models}
+                    selected_llm_model_id={@selected_llm_model_id}
+                  />
                 </div>
               </div>
               <SourcesComponents.sources_sidebar
@@ -1781,25 +1768,12 @@ defmodule LiteskillWeb.ChatLive do
                     <.icon name="hero-paper-airplane-micro" class="size-5" />
                   </button>
                 </.form>
-                <div
-                  :if={@available_llm_models != []}
-                  class="flex items-center gap-1 mt-2 px-1"
-                >
-                  <.icon name="hero-cpu-chip-micro" class="size-3 text-base-content/40" />
-                  <form phx-change="select_llm_model">
-                    <select
-                      id="model-picker-new"
-                      name="model_id"
-                      class="select select-ghost select-xs text-xs text-base-content/50 hover:text-base-content/70 min-h-0 h-6 pl-0"
-                    >
-                      <%= for m <- @available_llm_models do %>
-                        <option value={m.id} selected={m.id == @selected_llm_model_id}>
-                          {m.name}
-                        </option>
-                      <% end %>
-                    </select>
-                  </form>
-                </div>
+                <.model_picker
+                  id="model-picker-new"
+                  class="mt-2"
+                  available_llm_models={@available_llm_models}
+                  selected_llm_model_id={@selected_llm_model_id}
+                />
                 <p
                   :if={@available_llm_models == []}
                   class="text-sm text-warning mt-2 px-1"
@@ -3272,6 +3246,32 @@ defmodule LiteskillWeb.ChatLive do
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  attr :id, :string, required: true
+  attr :class, :string, default: "mt-1"
+  attr :available_llm_models, :list, required: true
+  attr :selected_llm_model_id, :string, default: nil
+
+  defp model_picker(assigns) do
+    ~H"""
+    <div :if={@available_llm_models != []} class={["flex items-center gap-1 px-1", @class]}>
+      <.icon name="hero-cpu-chip-micro" class="size-3 text-base-content/40" />
+      <form phx-change="select_llm_model">
+        <select
+          id={@id}
+          name="model_id"
+          class="select select-ghost select-xs text-xs text-base-content/50 hover:text-base-content/70 min-h-0 h-6 pl-0"
+        >
+          <%= for m <- @available_llm_models do %>
+            <option value={m.id} selected={m.id == @selected_llm_model_id}>
+              {m.name}
+            </option>
+          <% end %>
+        </select>
+      </form>
+    </div>
+    """
+  end
 
   defp handle_event_store_event(
          %{event_type: "AssistantStreamStarted"},

@@ -295,6 +295,45 @@ defmodule Liteskill.LlmModelsTest do
       models = LlmModels.list_active_models(admin.id)
       assert length(models) == 2
     end
+
+    test "filters out models whose provider is inactive", %{admin: admin} do
+      {:ok, inactive_provider} =
+        LlmProviders.create_provider(%{
+          name: "Inactive Provider",
+          provider_type: "openai",
+          status: "inactive",
+          user_id: admin.id
+        })
+
+      {:ok, _model_on_inactive} =
+        LlmModels.create_model(%{
+          name: "Model on Inactive",
+          model_id: "gpt-4o-inactive",
+          provider_id: inactive_provider.id,
+          user_id: admin.id,
+          status: "active"
+        })
+
+      {:ok, active_provider} =
+        LlmProviders.create_provider(%{
+          name: "Active Provider",
+          provider_type: "anthropic",
+          user_id: admin.id
+        })
+
+      {:ok, _model_on_active} =
+        LlmModels.create_model(%{
+          name: "Model on Active",
+          model_id: "claude-active",
+          provider_id: active_provider.id,
+          user_id: admin.id,
+          status: "active"
+        })
+
+      models = LlmModels.list_active_models(admin.id)
+      assert length(models) == 1
+      assert hd(models).name == "Model on Active"
+    end
   end
 
   describe "get_model/2" do

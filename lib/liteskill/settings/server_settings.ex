@@ -6,6 +6,7 @@ defmodule Liteskill.Settings.ServerSettings do
 
   schema "server_settings" do
     field :registration_open, :boolean, default: true
+    field :singleton, :boolean, default: true
 
     timestamps(type: :utc_datetime)
   end
@@ -14,5 +15,6 @@ defmodule Liteskill.Settings.ServerSettings do
     settings
     |> cast(attrs, [:registration_open])
     |> validate_required([:registration_open])
+    |> unique_constraint(:singleton)
   end
 end

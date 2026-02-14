@@ -6,7 +6,13 @@ defmodule LiteskillWeb.AuthLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket, form: to_form(%{}, as: :user), error: nil, invitation: nil)}
+    {:ok,
+     assign(socket,
+       form: to_form(%{}, as: :user),
+       error: nil,
+       invitation: nil,
+       registration_open: Settings.registration_open?()
+     )}
   end
 
   @impl true
@@ -64,9 +70,6 @@ defmodule LiteskillWeb.AuthLive do
   end
 
   defp render_form(%{live_action: :register} = assigns) do
-    registration_open = Settings.registration_open?()
-    assigns = assign(assigns, :registration_open, registration_open)
-
     ~H"""
     <div :if={!@registration_open} class="text-center space-y-4">
       <p class="text-base-content/70">
@@ -140,9 +143,6 @@ defmodule LiteskillWeb.AuthLive do
   end
 
   defp render_form(%{live_action: :login} = assigns) do
-    registration_open = Settings.registration_open?()
-    assigns = assign(assigns, :registration_open, registration_open)
-
     ~H"""
     <.form for={@form} phx-submit="submit" class="space-y-4">
       <div class="form-control">

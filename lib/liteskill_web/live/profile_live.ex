@@ -1414,15 +1414,19 @@ defmodule LiteskillWeb.ProfileLive do
   # --- LLM Provider event handlers ---
 
   def handle_event("new_llm_provider", _params, socket) do
-    {:noreply,
-     Phoenix.Component.assign(socket,
-       editing_llm_provider: :new,
-       llm_provider_form: to_form(%{}, as: :llm_provider)
-     )}
+    require_admin(socket, fn ->
+      {:noreply,
+       Phoenix.Component.assign(socket,
+         editing_llm_provider: :new,
+         llm_provider_form: to_form(%{}, as: :llm_provider)
+       )}
+    end)
   end
 
   def handle_event("cancel_llm_provider", _params, socket) do
-    {:noreply, Phoenix.Component.assign(socket, editing_llm_provider: nil)}
+    require_admin(socket, fn ->
+      {:noreply, Phoenix.Component.assign(socket, editing_llm_provider: nil)}
+    end)
   end
 
   def handle_event("create_llm_provider", %{"llm_provider" => params}, socket) do
@@ -1526,15 +1530,19 @@ defmodule LiteskillWeb.ProfileLive do
   # --- LLM Model event handlers ---
 
   def handle_event("new_llm_model", _params, socket) do
-    {:noreply,
-     Phoenix.Component.assign(socket,
-       editing_llm_model: :new,
-       llm_model_form: to_form(%{}, as: :llm_model)
-     )}
+    require_admin(socket, fn ->
+      {:noreply,
+       Phoenix.Component.assign(socket,
+         editing_llm_model: :new,
+         llm_model_form: to_form(%{}, as: :llm_model)
+       )}
+    end)
   end
 
   def handle_event("cancel_llm_model", _params, socket) do
-    {:noreply, Phoenix.Component.assign(socket, editing_llm_model: nil)}
+    require_admin(socket, fn ->
+      {:noreply, Phoenix.Component.assign(socket, editing_llm_model: nil)}
+    end)
   end
 
   def handle_event("create_llm_model", %{"llm_model" => params}, socket) do
