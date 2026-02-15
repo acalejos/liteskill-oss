@@ -163,6 +163,8 @@ defmodule LiteskillWeb.ReportComponents do
   attr :owned, :boolean, required: true
 
   def report_row(assigns) do
+    assigns = assign(assigns, :creator, creator_label(assigns.report))
+
     ~H"""
     <div class="flex items-center gap-3 px-4 py-3 hover:bg-base-200/50 transition-colors group border-b border-base-200 last:border-b-0">
       <.icon name="hero-document-text-micro" class="size-4 text-base-content/40 flex-shrink-0" />
@@ -172,6 +174,10 @@ defmodule LiteskillWeb.ReportComponents do
       >
         {@report.title}
       </.link>
+      <span class="text-xs text-base-content/50 flex-shrink-0 flex items-center gap-1">
+        <.icon name={creator_icon(@report)} class="size-3" />
+        {@creator}
+      </span>
       <span :if={!@owned} class="badge badge-sm badge-info flex-shrink-0">shared</span>
       <span class="text-xs text-base-content/50 flex-shrink-0">
         {Calendar.strftime(@report.updated_at, "%b %d, %Y")}
@@ -246,4 +252,12 @@ defmodule LiteskillWeb.ReportComponents do
   defp heading_class(2), do: "text-lg"
   defp heading_class(3), do: "text-base"
   defp heading_class(_), do: "text-sm"
+
+  defp creator_label(%{run: %{team_definition: %{name: name}}}) when is_binary(name), do: name
+  defp creator_label(%{run: %{id: id}}) when not is_nil(id), do: "Agent Run"
+  defp creator_label(%{user: %{name: name}}) when is_binary(name), do: name
+  defp creator_label(_), do: "Unknown"
+
+  defp creator_icon(%{run: %{id: id}}) when not is_nil(id), do: "hero-cpu-chip-micro"
+  defp creator_icon(_), do: "hero-user-micro"
 end

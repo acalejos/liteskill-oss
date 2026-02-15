@@ -25,11 +25,17 @@ defmodule Liteskill.Reports do
 
   # --- Reports CRUD ---
 
-  def create_report(user_id, title) do
+  def create_report(user_id, title, opts \\ []) do
+    run_id = Keyword.get(opts, :run_id)
+
+    attrs =
+      %{title: title, user_id: user_id}
+      |> then(fn a -> if run_id, do: Map.put(a, :run_id, run_id), else: a end)
+
     Repo.transaction(fn ->
       report =
         %Report{}
-        |> Report.changeset(%{title: title, user_id: user_id})
+        |> Report.changeset(attrs)
         |> Repo.insert!()
 
       {:ok, _} = Authorization.create_owner_acl("report", report.id, user_id)
@@ -65,6 +71,7 @@ defmodule Liteskill.Reports do
       |> limit(@reports_per_page)
       |> offset(^(@reports_per_page * (page - 1)))
       |> Repo.all()
+      |> Repo.preload([:user, run: :team_definition])
 
     %{reports: reports, page: page, total_pages: total_pages, total: total}
   end

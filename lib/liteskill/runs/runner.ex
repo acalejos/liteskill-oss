@@ -74,7 +74,7 @@ defmodule Liteskill.Runs.Runner do
       "agents" => Enum.map(agents, fn {a, m} -> %{"name" => a.name, "role" => m.role} end)
     })
 
-    context = [user_id: user_id]
+    context = [user_id: user_id, run_id: run.id]
     title = build_report_title(run, agents)
 
     with {:ok, %{"content" => [%{"text" => create_json}]}} <-

@@ -259,7 +259,7 @@ defmodule LiteskillWeb.ChatLive do
       editing_mcp: nil,
       pending_tool_calls: [],
       wiki_sidebar_tree: [],
-      page_title: "MCP Servers"
+      page_title: "Tools"
     )
   end
 
@@ -556,7 +556,7 @@ defmodule LiteskillWeb.ChatLive do
               )
             ]}
           >
-            <.icon name="hero-server-stack-micro" class="size-4" /> MCP Servers
+            <.icon name="hero-wrench-screwdriver-micro" class="size-4" /> Tools
           </.link>
           <.link
             navigate={~p"/reports"}
@@ -1054,23 +1054,43 @@ defmodule LiteskillWeb.ChatLive do
           </header>
 
           <div class="flex flex-1 min-h-0 overflow-hidden">
-            <aside
-              :if={@wiki_sidebar_tree != [] && @wiki_space}
-              class="w-56 flex-shrink-0 border-r border-base-300 overflow-y-auto bg-base-200/50"
-            >
-              <div class="p-3">
-                <.link
-                  navigate={~p"/wiki/#{@wiki_space.id}"}
-                  class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-2 hover:text-primary transition-colors block truncate"
-                >
-                  {@wiki_space.title}
-                </.link>
-                <WikiComponents.wiki_tree_sidebar
-                  tree={@wiki_sidebar_tree}
-                  active_doc_id={if @wiki_document, do: @wiki_document.id, else: nil}
-                />
-              </div>
-            </aside>
+            <%= if @wiki_sidebar_tree != [] && @wiki_space do %>
+              <%= if @wiki_sidebar_open do %>
+                <aside class="w-56 flex-shrink-0 border-r border-base-300 overflow-y-auto bg-base-200/50">
+                  <div class="p-3 min-w-56">
+                    <div class="flex items-center justify-between mb-2">
+                      <.link
+                        navigate={~p"/wiki/#{@wiki_space.id}"}
+                        class="text-xs font-semibold text-base-content/50 uppercase tracking-wider hover:text-primary transition-colors truncate"
+                      >
+                        {@wiki_space.title}
+                      </.link>
+                      <button
+                        phx-click="toggle_wiki_sidebar"
+                        class="btn btn-ghost btn-xs btn-circle"
+                        title="Collapse sidebar"
+                      >
+                        <.icon name="hero-chevron-left-micro" class="size-3.5" />
+                      </button>
+                    </div>
+                    <WikiComponents.wiki_tree_sidebar
+                      tree={@wiki_sidebar_tree}
+                      active_doc_id={if @wiki_document, do: @wiki_document.id, else: nil}
+                    />
+                  </div>
+                </aside>
+              <% else %>
+                <div class="flex-shrink-0 border-r border-base-300 bg-base-200/50 flex items-start pt-2 px-1">
+                  <button
+                    phx-click="toggle_wiki_sidebar"
+                    class="btn btn-ghost btn-xs btn-circle"
+                    title="Show wiki nav"
+                  >
+                    <.icon name="hero-chevron-right-micro" class="size-3.5" />
+                  </button>
+                </div>
+              <% end %>
+            <% end %>
             <div class="flex-1 min-w-0 flex flex-col">
               <%= if @wiki_editing do %>
                 <div class="flex-1 overflow-y-auto px-6 py-6 max-w-3xl mx-auto w-full">
@@ -1194,7 +1214,7 @@ defmodule LiteskillWeb.ChatLive do
                 >
                   <.icon name="hero-bars-3-micro" class="size-5" />
                 </button>
-                <h1 class="text-lg font-semibold">MCP Servers</h1>
+                <h1 class="text-lg font-semibold">Tools</h1>
               </div>
               <button phx-click="show_add_mcp" class="btn btn-primary btn-sm gap-1">
                 <.icon name="hero-plus-micro" class="size-4" /> Add Server
@@ -1217,7 +1237,7 @@ defmodule LiteskillWeb.ChatLive do
               :if={@mcp_servers == []}
               class="text-base-content/50 text-center py-12"
             >
-              No MCP servers configured yet. Click "Add Server" to get started.
+              No tool servers configured yet. Click "Add Server" to get started.
             </p>
           </div>
 
@@ -2461,6 +2481,10 @@ defmodule LiteskillWeb.ChatLive do
 
   # --- Wiki Event Delegation ---
 
+  def handle_event("toggle_wiki_sidebar", _params, socket) do
+    {:noreply, assign(socket, wiki_sidebar_open: !socket.assigns.wiki_sidebar_open)}
+  end
+
   @wiki_events ~w(show_wiki_form close_wiki_form create_wiki_page edit_wiki_page
     cancel_wiki_edit update_wiki_page delete_wiki_page open_wiki_export_modal
     close_wiki_export_modal confirm_wiki_export)
@@ -3466,7 +3490,8 @@ defmodule LiteskillWeb.ChatLive do
             server_name: server.name,
             name: tool["name"],
             description: tool["description"],
-            input_schema: tool["inputSchema"]
+            input_schema: tool["inputSchema"],
+            source: :builtin
           }
         end)
       end)
@@ -3483,7 +3508,8 @@ defmodule LiteskillWeb.ChatLive do
                   server_name: server.name,
                   name: tool["name"],
                   description: tool["description"],
-                  input_schema: tool["inputSchema"]
+                  input_schema: tool["inputSchema"],
+                  source: :mcp
                 }
               end)
 
@@ -3982,7 +4008,8 @@ defmodule LiteskillWeb.ChatLive do
               server_name: server.name,
               name: tool["name"],
               description: tool["description"],
-              input_schema: tool["inputSchema"]
+              input_schema: tool["inputSchema"],
+              source: :builtin
             }
           end)
         end)

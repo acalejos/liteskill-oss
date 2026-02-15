@@ -14,6 +14,7 @@ defmodule LiteskillWeb.WikiLive do
       wiki_document: nil,
       wiki_tree: [],
       wiki_sidebar_tree: [],
+      wiki_sidebar_open: true,
       wiki_form: to_form(%{"title" => "", "content" => ""}, as: :wiki_page),
       show_wiki_form: false,
       wiki_editing: nil,

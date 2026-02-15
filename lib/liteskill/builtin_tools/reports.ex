@@ -166,7 +166,7 @@ defmodule Liteskill.BuiltinTools.Reports do
     user_id = Keyword.fetch!(context, :user_id)
 
     case tool_name do
-      "reports__create" -> do_create(user_id, input)
+      "reports__create" -> do_create(user_id, input, context)
       "reports__list" -> do_list(user_id)
       "reports__get" -> do_get(user_id, input)
       "reports__modify_sections" -> do_modify_sections(user_id, input)
@@ -177,8 +177,10 @@ defmodule Liteskill.BuiltinTools.Reports do
     |> wrap_result()
   end
 
-  defp do_create(user_id, %{"title" => title}) do
-    case Reports.create_report(user_id, title) do
+  defp do_create(user_id, %{"title" => title}, context) do
+    opts = if run_id = Keyword.get(context, :run_id), do: [run_id: run_id], else: []
+
+    case Reports.create_report(user_id, title, opts) do
       {:ok, report} ->
         {:ok, %{"id" => report.id, "title" => report.title}}
 
@@ -189,7 +191,7 @@ defmodule Liteskill.BuiltinTools.Reports do
     end
   end
 
-  defp do_create(_user_id, _input), do: {:error, "Missing required field: title"}
+  defp do_create(_user_id, _input, _context), do: {:error, "Missing required field: title"}
 
   defp do_list(user_id) do
     reports = Reports.list_reports(user_id)
