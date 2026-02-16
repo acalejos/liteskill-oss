@@ -15,12 +15,16 @@ defmodule Liteskill.Schedules do
   # --- CRUD ---
 
   def create_schedule(attrs) do
-    changeset =
-      %Schedule{}
-      |> Schedule.changeset(attrs)
-      |> maybe_set_next_run_at()
+    user_id = attrs[:user_id] || attrs["user_id"]
 
-    Authorization.create_with_owner_acl(changeset, "schedule", [:team_definition])
+    with :ok <- Liteskill.Rbac.authorize(user_id, "schedules:create") do
+      changeset =
+        %Schedule{}
+        |> Schedule.changeset(attrs)
+        |> maybe_set_next_run_at()
+
+      Authorization.create_with_owner_acl(changeset, "schedule", [:team_definition])
+    end
   end
 
   defp maybe_set_next_run_at(changeset) do

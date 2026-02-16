@@ -32,6 +32,7 @@ Liteskill.Supervisor (:rest_for_one)
   +-- Boot Task (non-test only)          # One-time setup tasks
   |     |
   |     +-- Accounts.ensure_admin_user()
+  |     +-- Rbac.ensure_system_roles()
   |     +-- LlmProviders.ensure_env_providers()
   |     +-- Settings.get()
   |
@@ -88,13 +89,15 @@ Oban uses PostgreSQL for job persistence, providing at-least-once delivery guara
 
 ### Boot Tasks
 
-A one-time `Task` (skipped in the test environment) runs three setup operations immediately after infrastructure is ready:
+A one-time `Task` (skipped in the test environment) runs four setup operations immediately after infrastructure is ready:
 
 1. **`Accounts.ensure_admin_user()`** -- Creates the root admin account (`admin@liteskill.local`) if it does not already exist. This ensures there is always a way to access the system after a fresh deployment.
 
-2. **`LlmProviders.ensure_env_providers()`** -- Auto-creates LLM provider records from environment variables. This allows operators to configure providers via environment variables (e.g., for containerized deployments) without manual database setup.
+2. **`Rbac.ensure_system_roles()`** -- Seeds the two system RBAC roles (`Instance Admin` with wildcard `"*"` permission, and `Default` with baseline permissions). Also migrates existing admin users to the `Instance Admin` role. Runs as an upsert, so it is idempotent across restarts.
 
-3. **`Settings.get()`** -- Initializes the singleton server settings record if it does not exist. The settings module uses a singleton pattern with a database-enforced unique constraint.
+3. **`LlmProviders.ensure_env_providers()`** -- Auto-creates LLM provider records from environment variables. This allows operators to configure providers via environment variables (e.g., for containerized deployments) without manual database setup.
+
+4. **`Settings.get()`** -- Initializes the singleton server settings record if it does not exist. The settings module uses a singleton pattern with a database-enforced unique constraint.
 
 These tasks run before the Projector and Endpoint start, ensuring that the system is in a consistent initial state before it begins accepting requests.
 

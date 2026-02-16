@@ -49,18 +49,22 @@ defmodule Liteskill.McpServers do
   end
 
   def create_server(attrs) do
-    Repo.transaction(fn ->
-      case %McpServer{}
-           |> McpServer.changeset(attrs)
-           |> Repo.insert() do
-        {:ok, server} ->
-          {:ok, _} = Authorization.create_owner_acl("mcp_server", server.id, server.user_id)
-          server
+    user_id = attrs[:user_id] || attrs["user_id"]
 
-        {:error, changeset} ->
-          Repo.rollback(changeset)
-      end
-    end)
+    with :ok <- Liteskill.Rbac.authorize(user_id, "mcp_servers:create") do
+      Repo.transaction(fn ->
+        case %McpServer{}
+             |> McpServer.changeset(attrs)
+             |> Repo.insert() do
+          {:ok, server} ->
+            {:ok, _} = Authorization.create_owner_acl("mcp_server", server.id, server.user_id)
+            server
+
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
+      end)
+    end
   end
 
   def update_server(server, user_id, attrs) do

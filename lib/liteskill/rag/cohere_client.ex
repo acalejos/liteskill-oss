@@ -27,7 +27,10 @@ defmodule Liteskill.Rag.CohereClient do
   """
   def embed(texts, opts \\ []) do
     {user_id, opts} = Keyword.pop(opts, :user_id)
+    {model_override, opts} = Keyword.pop(opts, :model_id)
     {req_opts, body_opts} = Keyword.split(opts, [:plug])
+
+    model_id = model_override || resolve_embed_model()
 
     body = %{
       "texts" => texts,
@@ -40,7 +43,7 @@ defmodule Liteskill.Rag.CohereClient do
     start = System.monotonic_time(:millisecond)
 
     result =
-      case Req.post(base_req(), [{:url, invoke_url(@embed_model)}, {:json, body}] ++ req_opts) do
+      case Req.post(base_req(), [{:url, invoke_url(model_id)}, {:json, body}] ++ req_opts) do
         {:ok, %{status: 200, body: %{"embeddings" => %{"float" => embeddings}}}} ->
           {:ok, embeddings}
 
@@ -56,7 +59,7 @@ defmodule Liteskill.Rag.CohereClient do
 
     log_request(user_id, %{
       request_type: "embed",
-      model_id: @embed_model,
+      model_id: model_id,
       input_count: length(texts),
       token_count: estimate_token_count(texts),
       latency_ms: latency,
@@ -114,6 +117,13 @@ defmodule Liteskill.Rag.CohereClient do
     })
 
     result
+  end
+
+  defp resolve_embed_model do
+    case Liteskill.Settings.get() do
+      %{embedding_model: %{model_id: mid}} when is_binary(mid) -> mid
+      _ -> @embed_model
+    end
   end
 
   defp base_req do

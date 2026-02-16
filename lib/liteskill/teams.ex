@@ -14,9 +14,13 @@ defmodule Liteskill.Teams do
   # --- CRUD ---
 
   def create_team(attrs) do
-    %TeamDefinition{}
-    |> TeamDefinition.changeset(attrs)
-    |> Authorization.create_with_owner_acl("team_definition", team_members: :agent_definition)
+    user_id = attrs[:user_id] || attrs["user_id"]
+
+    with :ok <- Liteskill.Rbac.authorize(user_id, "teams:create") do
+      %TeamDefinition{}
+      |> TeamDefinition.changeset(attrs)
+      |> Authorization.create_with_owner_acl("team_definition", team_members: :agent_definition)
+    end
   end
 
   def update_team(id, user_id, attrs) do

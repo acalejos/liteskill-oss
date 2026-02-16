@@ -29,7 +29,16 @@ Uses the `pgvector/pgvector:pg16` image, which includes PostgreSQL 16 with the p
 
 ### `app` -- Liteskill Application
 
+The `docker-compose.yml` uses a YAML anchor (`x-app-env`) to share environment variables between the `app` and `migrate` services:
+
 ```yaml
+x-app-env: &app-env
+  DATABASE_URL: "ecto://${POSTGRES_USER:-liteskill}:${POSTGRES_PASSWORD:-liteskill}@db/${POSTGRES_DB:-liteskill}"
+  SECRET_KEY_BASE: "${SECRET_KEY_BASE:?SECRET_KEY_BASE is required...}"
+  ENCRYPTION_KEY: "${ENCRYPTION_KEY:?ENCRYPTION_KEY is required...}"
+  AWS_BEARER_TOKEN_BEDROCK: "${AWS_BEARER_TOKEN_BEDROCK:?AWS_BEARER_TOKEN_BEDROCK is required...}"
+  AWS_REGION: "${AWS_REGION:?AWS_REGION is required...}"
+
 app:
   build: .
   restart: unless-stopped
@@ -39,13 +48,13 @@ app:
   ports:
     - "4000:4000"
   environment:
-    DATABASE_URL: "ecto://${POSTGRES_USER:-liteskill}:${POSTGRES_PASSWORD:-liteskill}@db/${POSTGRES_DB:-liteskill}"
-    SECRET_KEY_BASE: "${SECRET_KEY_BASE}"
-    ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+    <<: *app-env
     PHX_HOST: "localhost"
 ```
 
 Builds from the project Dockerfile and starts the server on port 4000. The `bin/server` entrypoint automatically runs pending migrations before starting the HTTP server. Waits for the database health check to pass before starting.
+
+> **Note:** The default `docker-compose.yml` enforces `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` as required for the RAG embedding pipeline (Cohere embed-v4 on Bedrock). If you do not need RAG, remove these lines from the `x-app-env` anchor.
 
 ### `migrate` -- Manual Migrations (Tools Profile)
 

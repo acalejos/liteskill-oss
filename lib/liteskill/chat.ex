@@ -17,25 +17,28 @@ defmodule Liteskill.Chat do
   # --- Write API ---
 
   def create_conversation(params) do
-    conversation_id = params[:conversation_id] || Ecto.UUID.generate()
-    stream_id = "conversation-#{conversation_id}"
+    with :ok <-
+           Liteskill.Rbac.authorize(params[:user_id] || params.user_id, "conversations:create") do
+      conversation_id = params[:conversation_id] || Ecto.UUID.generate()
+      stream_id = "conversation-#{conversation_id}"
 
-    {model_id, llm_model_id} =
-      case params[:llm_model_id] do
-        nil ->
-          {params[:model_id], nil}
+      {model_id, llm_model_id} =
+        case params[:llm_model_id] do
+          nil ->
+            {params[:model_id], nil}
 
-        llm_model_id ->
-          case Liteskill.LlmModels.get_model(llm_model_id, params.user_id) do
-            {:ok, %{model_id: mid}} -> {mid, llm_model_id}
-            {:error, _} -> {params[:model_id], nil}
-          end
+          llm_model_id ->
+            case Liteskill.LlmModels.get_model(llm_model_id, params.user_id) do
+              {:ok, %{model_id: mid}} -> {mid, llm_model_id}
+              {:error, _} -> {params[:model_id], nil}
+            end
+        end
+
+      if params[:llm_model_id] && is_nil(model_id) do
+        {:error, :no_model_configured}
+      else
+        do_create_conversation(conversation_id, stream_id, params, model_id, llm_model_id)
       end
-
-    if params[:llm_model_id] && is_nil(model_id) do
-      {:error, :no_model_configured}
-    else
-      do_create_conversation(conversation_id, stream_id, params, model_id, llm_model_id)
     end
   end
 

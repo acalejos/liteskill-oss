@@ -15,12 +15,16 @@ defmodule Liteskill.Agents do
   # --- CRUD ---
 
   def create_agent(attrs) do
-    %AgentDefinition{}
-    |> AgentDefinition.changeset(attrs)
-    |> Authorization.create_with_owner_acl("agent_definition", [
-      :llm_model,
-      agent_tools: :mcp_server
-    ])
+    user_id = attrs[:user_id] || attrs["user_id"]
+
+    with :ok <- Liteskill.Rbac.authorize(user_id, "agents:create") do
+      %AgentDefinition{}
+      |> AgentDefinition.changeset(attrs)
+      |> Authorization.create_with_owner_acl("agent_definition", [
+        :llm_model,
+        agent_tools: :mcp_server
+      ])
+    end
   end
 
   def update_agent(id, user_id, attrs) do

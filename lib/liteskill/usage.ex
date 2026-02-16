@@ -463,4 +463,92 @@ defmodule Liteskill.Usage do
 
   defp maybe_to(query, nil), do: query
   defp maybe_to(query, to), do: where(query, [r], r.inserted_at < ^to)
+
+  # --- Embedding Usage ---
+
+  alias Liteskill.LlmModels.LlmModel
+  alias Liteskill.Rag.EmbeddingRequest
+
+  @doc """
+  Returns aggregate embedding usage totals.
+  """
+  def embedding_totals(opts \\ []) do
+    EmbeddingRequest
+    |> join(:left, [r], m in subquery(embedding_cost_subquery()), on: r.model_id == m.model_id)
+    |> apply_time_filters(opts)
+    |> select([r, m], %{
+      request_count: count(r.id),
+      total_tokens: coalesce(sum(r.token_count), 0),
+      total_inputs: coalesce(sum(r.input_count), 0),
+      avg_latency_ms: fragment("coalesce(avg(?), 0)", r.latency_ms),
+      error_count: fragment("count(case when ? = 'error' then 1 end)", r.status),
+      estimated_cost:
+        fragment(
+          "coalesce(sum(? * ? / 1000000.0), 0)",
+          r.token_count,
+          m.input_cost_per_million
+        )
+    })
+    |> Repo.one()
+  end
+
+  @doc """
+  Returns embedding usage grouped by model_id.
+  """
+  def embedding_by_model(opts \\ []) do
+    EmbeddingRequest
+    |> join(:left, [r], m in subquery(embedding_cost_subquery()), on: r.model_id == m.model_id)
+    |> apply_time_filters(opts)
+    |> group_by([r, m], r.model_id)
+    |> select([r, m], %{
+      model_id: r.model_id,
+      request_count: count(r.id),
+      total_tokens: coalesce(sum(r.token_count), 0),
+      total_inputs: coalesce(sum(r.input_count), 0),
+      avg_latency_ms: fragment("coalesce(avg(?), 0)", r.latency_ms),
+      error_count: fragment("count(case when ? = 'error' then 1 end)", r.status),
+      estimated_cost:
+        fragment(
+          "coalesce(sum(? * ? / 1000000.0), 0)",
+          r.token_count,
+          m.input_cost_per_million
+        )
+    })
+    |> order_by([r], desc: count(r.id))
+    |> Repo.all()
+  end
+
+  @doc """
+  Returns embedding usage grouped by user_id.
+  """
+  def embedding_by_user(opts \\ []) do
+    EmbeddingRequest
+    |> join(:left, [r], m in subquery(embedding_cost_subquery()), on: r.model_id == m.model_id)
+    |> apply_time_filters(opts)
+    |> group_by([r, m], r.user_id)
+    |> select([r, m], %{
+      user_id: r.user_id,
+      request_count: count(r.id),
+      total_tokens: coalesce(sum(r.token_count), 0),
+      total_inputs: coalesce(sum(r.input_count), 0),
+      avg_latency_ms: fragment("coalesce(avg(?), 0)", r.latency_ms),
+      error_count: fragment("count(case when ? = 'error' then 1 end)", r.status),
+      estimated_cost:
+        fragment(
+          "coalesce(sum(? * ? / 1000000.0), 0)",
+          r.token_count,
+          m.input_cost_per_million
+        )
+    })
+    |> order_by([r], desc: coalesce(sum(r.token_count), 0))
+    |> Repo.all()
+  end
+
+  defp embedding_cost_subquery do
+    from(m in LlmModel,
+      where: m.model_type in ["embedding", "rerank"],
+      distinct: m.model_id,
+      select: %{model_id: m.model_id, input_cost_per_million: m.input_cost_per_million}
+    )
+  end
 end

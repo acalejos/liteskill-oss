@@ -15,9 +15,13 @@ defmodule Liteskill.Runs do
   # --- CRUD ---
 
   def create_run(attrs) do
-    %Run{}
-    |> Run.changeset(attrs)
-    |> Authorization.create_with_owner_acl("run", [:team_definition, :run_tasks, :run_logs])
+    user_id = attrs[:user_id] || attrs["user_id"]
+
+    with :ok <- Liteskill.Rbac.authorize(user_id, "runs:create") do
+      %Run{}
+      |> Run.changeset(attrs)
+      |> Authorization.create_with_owner_acl("run", [:team_definition, :run_tasks, :run_logs])
+    end
   end
 
   def update_run(id, user_id, attrs) do

@@ -1733,4 +1733,174 @@ defmodule Liteskill.RagTest do
       assert Rag.list_chunks_for_document(doc.id) == []
     end
   end
+
+  # --- Re-embedding support ---
+
+  describe "total_chunk_count/0" do
+    test "returns 0 when no chunks", %{owner: _owner} do
+      assert Rag.total_chunk_count() == 0
+    end
+
+    test "returns correct count across documents", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      {:ok, doc1} = create_document(source.id, owner.id, %{title: "Doc1"})
+      {:ok, doc2} = create_document(source.id, owner.id, %{title: "Doc2"})
+
+      for pos <- 0..2 do
+        insert_chunk(doc1.id, pos)
+      end
+
+      insert_chunk(doc2.id, 0)
+
+      assert Rag.total_chunk_count() == 4
+    end
+  end
+
+  describe "clear_all_embeddings/0" do
+    test "clears embeddings and resets document statuses", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      {:ok, doc} = create_document(source.id, owner.id, %{title: "Embedded"})
+
+      embedding = Pgvector.new(List.duplicate(0.1, 1024))
+
+      chunk =
+        insert_chunk(doc.id, 0, embedding: embedding)
+
+      doc
+      |> Document.changeset(%{status: "embedded", chunk_count: 1})
+      |> Repo.update!()
+
+      assert {:ok, %{chunks_cleared: 1, documents_reset: 1}} = Rag.clear_all_embeddings()
+
+      updated_chunk = Repo.get!(Chunk, chunk.id)
+      assert updated_chunk.embedding == nil
+
+      updated_doc = Repo.get!(Document, doc.id)
+      assert updated_doc.status == "pending"
+    end
+
+    test "returns zeros when nothing to clear", %{owner: _owner} do
+      assert {:ok, %{chunks_cleared: 0, documents_reset: 0}} = Rag.clear_all_embeddings()
+    end
+
+    test "only clears chunks that have embeddings", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      {:ok, doc} = create_document(source.id, owner.id, %{title: "Mixed"})
+
+      embedding = Pgvector.new(List.duplicate(0.1, 1024))
+      insert_chunk(doc.id, 0, embedding: embedding)
+      insert_chunk(doc.id, 1)
+
+      assert {:ok, %{chunks_cleared: 1}} = Rag.clear_all_embeddings()
+    end
+
+    test "only resets documents with embedded status", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+
+      {:ok, doc1} = create_document(source.id, owner.id, %{title: "Embedded"})
+
+      doc1
+      |> Document.changeset(%{status: "embedded"})
+      |> Repo.update!()
+
+      {:ok, _doc2} = create_document(source.id, owner.id, %{title: "Pending"})
+
+      {:ok, doc3} = create_document(source.id, owner.id, %{title: "Error"})
+
+      doc3
+      |> Document.changeset(%{status: "error"})
+      |> Repo.update!()
+
+      assert {:ok, %{documents_reset: 1}} = Rag.clear_all_embeddings()
+    end
+  end
+
+  describe "list_documents_for_reembedding/2" do
+    test "returns pending documents with chunks", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+
+      {:ok, doc1} = create_document(source.id, owner.id, %{title: "Pending With Chunks"})
+
+      doc1
+      |> Document.changeset(%{chunk_count: 3})
+      |> Repo.update!()
+
+      insert_chunk(doc1.id, 0)
+
+      # Pending but no chunks — should NOT appear
+      {:ok, _doc2} = create_document(source.id, owner.id, %{title: "Pending No Chunks"})
+
+      # Embedded — should NOT appear
+      {:ok, doc3} = create_document(source.id, owner.id, %{title: "Already Embedded"})
+
+      doc3
+      |> Document.changeset(%{status: "embedded", chunk_count: 1})
+      |> Repo.update!()
+
+      results = Rag.list_documents_for_reembedding(10, 0)
+      assert length(results) == 1
+      assert hd(results).id == doc1.id
+    end
+
+    test "respects limit and offset", %{owner: owner} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+
+      for i <- 1..5 do
+        {:ok, doc} = create_document(source.id, owner.id, %{title: "Doc #{i}"})
+
+        doc
+        |> Document.changeset(%{chunk_count: 1})
+        |> Repo.update!()
+
+        insert_chunk(doc.id, 0)
+      end
+
+      all = Rag.list_documents_for_reembedding(100, 0)
+      total = length(all)
+
+      first_batch = Rag.list_documents_for_reembedding(2, 0)
+      assert length(first_batch) == 2
+
+      second_batch = Rag.list_documents_for_reembedding(2, 2)
+      assert length(second_batch) == 2
+
+      # first and second batch should not overlap
+      first_ids = MapSet.new(first_batch, & &1.id)
+      second_ids = MapSet.new(second_batch, & &1.id)
+      assert MapSet.disjoint?(first_ids, second_ids)
+
+      remaining = Rag.list_documents_for_reembedding(100, 4)
+      assert length(remaining) == total - 4
+    end
+
+    test "returns empty list when no pending documents", %{owner: _owner} do
+      assert Rag.list_documents_for_reembedding(10, 0) == []
+    end
+  end
+
+  defp insert_chunk(document_id, position, opts \\ []) do
+    attrs = %{
+      content: "Chunk #{position}",
+      position: position,
+      document_id: document_id,
+      token_count: 10,
+      content_hash: "hash_#{position}_#{System.unique_integer([:positive])}"
+    }
+
+    attrs =
+      case Keyword.get(opts, :embedding) do
+        nil -> attrs
+        emb -> Map.put(attrs, :embedding, emb)
+      end
+
+    %Chunk{}
+    |> Chunk.changeset(attrs)
+    |> Repo.insert!()
+  end
 end

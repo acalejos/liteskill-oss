@@ -121,6 +121,7 @@ Phoenix contexts serve as bounded contexts with clear boundaries:
 | `Liteskill.Agents` | Agent definitions |
 | `Liteskill.Teams` | Agent team definitions |
 | `Liteskill.Runs` | Agent run execution |
+| `Liteskill.Rbac` | Role-based access control, permissions |
 | `Liteskill.Schedules` | Scheduled runs |
 
 All `Chat` context functions require a `user_id` parameter for authorization.

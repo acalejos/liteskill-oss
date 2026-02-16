@@ -6,18 +6,22 @@ This guide covers running Liteskill using Docker. This is the fastest way to get
 
 ### 1. Create a `.env` File
 
-Liteskill requires two secret keys: one for session signing and one for encrypting sensitive fields (API keys, MCP credentials) at rest. Generate them with OpenSSL:
+The default `docker-compose.yml` requires several environment variables. Generate the secret keys with OpenSSL and provide your AWS credentials for the RAG embedding pipeline:
 
 ```bash
 cat <<EOF > .env
 SECRET_KEY_BASE=$(openssl rand -base64 64 | tr -d '\n')
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')
+AWS_BEARER_TOKEN_BEDROCK=your-bedrock-bearer-token
+AWS_REGION=us-east-1
 EOF
 ```
 
 Docker Compose reads the `.env` file automatically from the project root.
 
 > **Important:** Keep your `.env` file secure and never commit it to version control. The `SECRET_KEY_BASE` signs session cookies, and the `ENCRYPTION_KEY` protects API keys stored in the database. If you lose the `ENCRYPTION_KEY`, encrypted fields become unrecoverable.
+
+> **Note:** `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` are used for RAG embeddings (Cohere embed-v4 on Bedrock). If you do not need RAG, you can remove these variables and the corresponding lines from the `x-app-env` anchor in `docker-compose.yml`.
 
 ### 2. Start the Application
 
@@ -129,8 +133,8 @@ All configuration is loaded from environment variables at startup. The table bel
 | `OIDC_ISSUER` | OpenID Connect issuer URL (enables SSO login) | -- |
 | `OIDC_CLIENT_ID` | OIDC client ID | -- |
 | `OIDC_CLIENT_SECRET` | OIDC client secret | -- |
-| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock bearer token (only for legacy Bedrock RAG embeddings) | -- |
-| `AWS_REGION` | AWS region for Bedrock (only for legacy Bedrock RAG embeddings) | -- |
+| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock bearer token for RAG embeddings (Cohere embed-v4 on Bedrock). **Required by the default `docker-compose.yml`.** | -- |
+| `AWS_REGION` | AWS region for Bedrock API calls. **Required by the default `docker-compose.yml`.** | -- |
 
 ### Docker Compose Defaults
 

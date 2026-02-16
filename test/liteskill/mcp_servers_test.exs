@@ -95,7 +95,7 @@ defmodule Liteskill.McpServersTest do
     test "fails without required user_id" do
       attrs = %{name: "Server", url: "https://mcp.example.com"}
 
-      assert {:error, %Ecto.Changeset{}} = McpServers.create_server(attrs)
+      assert {:error, :forbidden} = McpServers.create_server(attrs)
     end
 
     test "fails with invalid status", %{owner: owner} do

@@ -92,15 +92,15 @@ You can override any of these in development by setting environment variables be
 | `OIDC_ISSUER` | OpenID Connect issuer URL (enables SSO login) |
 | `OIDC_CLIENT_ID` | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | OIDC client secret |
-| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock bearer token (only needed for legacy Bedrock RAG embeddings) |
-| `AWS_REGION` | AWS region for Bedrock (only needed for legacy Bedrock RAG embeddings) |
+| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock bearer token (needed for RAG embeddings via Cohere on Bedrock) |
+| `AWS_REGION` | AWS region for Bedrock (needed for RAG embeddings via Cohere on Bedrock) |
 
 LLM provider credentials (API keys, endpoints, regions) are configured through the admin UI after first login, not through environment variables.
 
 ## 6. Common Development Commands
 
 ```bash
-# Run the full pre-commit suite (compile with warnings-as-errors, format, test)
+# Run the full pre-commit suite (compile with warnings-as-errors, format, test, build docs)
 mise exec -- mix precommit
 
 # Run all tests
@@ -124,8 +124,9 @@ mise exec -- iex -S mix
 When the application starts (whether via `mix phx.server` or `iex -S mix`), the following happens automatically:
 
 1. The **admin user** (`admin@liteskill.local`) is created if it does not already exist. This user is guaranteed to have the `admin` role.
-2. The **Projector** GenServer starts and subscribes to PubSub for event store changes.
-3. The **Oban** job processor starts for background tasks (URL ingestion, agent runs, etc.).
-4. The **HTTP server** begins listening on the configured port.
+2. **RBAC system roles** are seeded (`Instance Admin` and `Default`), and existing admin users are assigned the `Instance Admin` role.
+3. The **Projector** GenServer starts and subscribes to PubSub for event store changes.
+4. The **Oban** job processor starts for background tasks (URL ingestion, agent runs, etc.).
+5. The **HTTP server** begins listening on the configured port.
 
 The admin user created on boot has no password set initially. See [First Run](first-run.md) for the setup wizard that guides you through initial configuration.

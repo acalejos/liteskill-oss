@@ -93,6 +93,7 @@ defmodule LiteskillWeb.ChatLive do
        rag_query_results: [],
        rag_query_collections: [],
        rag_query_error: nil,
+       rag_enabled: true,
        show_sources_sidebar: false,
        sidebar_sources: [],
        show_source_modal: false,
@@ -134,7 +135,8 @@ defmodule LiteskillWeb.ChatLive do
        selected_llm_model_id: selected_llm_model_id,
        # Conversation usage modal
        show_usage_modal: false,
-       usage_modal_data: nil
+       usage_modal_data: nil,
+       has_admin_access: Liteskill.Rbac.has_any_admin_permission?(user.id)
      )
      |> assign(WikiLive.wiki_assigns())
      |> assign(ReportsLive.reports_assigns())
@@ -185,7 +187,10 @@ defmodule LiteskillWeb.ChatLive do
               :admin_users,
               :admin_groups,
               :admin_providers,
-              :admin_models
+              :admin_models,
+              :admin_roles,
+              :admin_rag,
+              :admin_setup
             ] do
     maybe_unsubscribe(socket)
 
@@ -289,6 +294,7 @@ defmodule LiteskillWeb.ChatLive do
       rag_query_results: [],
       rag_query_loading: false,
       rag_query_error: nil,
+      rag_enabled: Liteskill.Settings.embedding_enabled?(),
       page_title: "Data Sources"
     )
   end
@@ -587,7 +593,7 @@ defmodule LiteskillWeb.ChatLive do
         </div>
 
         <div
-          :if={Liteskill.Accounts.User.admin?(@current_user)}
+          :if={@has_admin_access}
           class="p-2 border-t border-base-300 min-w-64"
         >
           <.link
@@ -663,6 +669,23 @@ defmodule LiteskillWeb.ChatLive do
           </header>
 
           <div class="flex-1 overflow-y-auto p-4">
+            <div
+              :if={!@rag_enabled}
+              class="alert alert-warning mb-4 flex items-start gap-3"
+            >
+              <.icon name="hero-exclamation-triangle-micro" class="size-6 mt-0.5 flex-shrink-0" />
+              <div>
+                <h3 class="font-bold text-lg">RAG Ingest Disabled</h3>
+                <p class="text-sm mt-1">
+                  No embedding model is configured. Data sources can be managed but
+                  documents will not be embedded for semantic search. An admin can
+                  configure an embedding model in <.link
+                    navigate={~p"/admin/rag"}
+                    class="link link-primary font-medium"
+                  >Admin &rarr; RAG</.link>.
+                </p>
+              </div>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               <SourcesComponents.source_card
                 :for={source <- @data_sources}
@@ -1547,6 +1570,28 @@ defmodule LiteskillWeb.ChatLive do
             new_invitation_url={@new_invitation_url}
             admin_usage_data={@admin_usage_data}
             admin_usage_period={@admin_usage_period}
+            rbac_roles={@rbac_roles}
+            editing_role={@editing_role}
+            role_form={@role_form}
+            role_users={@role_users}
+            role_groups={@role_groups}
+            role_user_search={@role_user_search}
+            setup_step={@setup_step}
+            setup_form={@setup_form}
+            setup_error={@setup_error}
+            setup_selected_permissions={@setup_selected_permissions}
+            setup_data_sources={@setup_data_sources}
+            setup_selected_sources={@setup_selected_sources}
+            setup_sources_to_configure={@setup_sources_to_configure}
+            setup_current_config_index={@setup_current_config_index}
+            setup_config_form={@setup_config_form}
+            rag_embedding_models={@rag_embedding_models}
+            rag_current_model={@rag_current_model}
+            rag_stats={@rag_stats}
+            rag_confirm_change={@rag_confirm_change}
+            rag_confirm_input={@rag_confirm_input}
+            rag_selected_model_id={@rag_selected_model_id}
+            rag_reembed_in_progress={@rag_reembed_in_progress}
           />
         <% end %>
         <%= if @live_action == :conversations do %>
@@ -3243,7 +3288,14 @@ defmodule LiteskillWeb.ChatLive do
     show_temp_password_form cancel_temp_password set_temp_password
     toggle_registration create_invitation revoke_invitation
     new_llm_model cancel_llm_model create_llm_model edit_llm_model update_llm_model delete_llm_model
-    new_llm_provider cancel_llm_provider create_llm_provider edit_llm_provider update_llm_provider delete_llm_provider)
+    new_llm_provider cancel_llm_provider create_llm_provider edit_llm_provider update_llm_provider delete_llm_provider
+    new_role cancel_role edit_role create_role update_role delete_role
+    assign_role_user remove_role_user assign_role_group remove_role_group
+    setup_password setup_skip_password
+    setup_toggle_permission setup_save_permissions setup_skip_permissions
+    setup_toggle_source setup_save_sources
+    setup_save_config setup_skip_config setup_skip_sources
+    rag_select_model rag_cancel_change rag_confirm_input_change rag_confirm_model_change)
 
   def handle_event(event, params, socket) when event in @admin_events do
     AdminLive.handle_event(event, params, socket)

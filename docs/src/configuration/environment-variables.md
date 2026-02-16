@@ -38,10 +38,12 @@ Set all three to enable OpenID Connect single sign-on. When `OIDC_CLIENT_ID` is 
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock bearer token (used for legacy RAG embeddings via Cohere) | -- |
+| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock bearer token (used for RAG embeddings via Cohere on Bedrock) | -- |
 | `AWS_REGION` | AWS region for Bedrock API calls | `us-east-1` |
 
-> **Note:** LLM provider credentials (API keys for Claude, GPT, etc.) are configured through the admin UI at `/admin/providers`, not through environment variables. The AWS variables above are specifically for the legacy Bedrock RAG embedding integration.
+> **Note:** LLM provider credentials (API keys for Claude, GPT, etc.) are configured through the admin UI at `/admin/providers`, not through environment variables. The AWS variables above are specifically for the RAG embedding pipeline (Cohere embed-v4 on Bedrock).
+>
+> **Docker Compose:** The default `docker-compose.yml` enforces these as **required** variables (the container will fail to start without them). If you do not need RAG embeddings, you can remove the `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` lines from the `x-app-env` anchor in `docker-compose.yml`.
 
 ## Generating Secrets
 
@@ -67,7 +69,7 @@ POSTGRES_DB=liteskill
 SECRET_KEY_BASE=your-secret-key-base-here
 ENCRYPTION_KEY=your-encryption-key-here
 
-# AWS (for LLM access)
+# AWS (required by default docker-compose.yml for RAG embeddings)
 AWS_BEARER_TOKEN_BEDROCK=your-bedrock-token
 AWS_REGION=us-east-1
 

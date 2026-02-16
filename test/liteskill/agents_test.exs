@@ -56,11 +56,14 @@ defmodule Liteskill.AgentsTest do
       assert Liteskill.Authorization.is_owner?("agent_definition", agent.id, owner.id)
     end
 
-    test "validates required fields" do
-      assert {:error, changeset} = Agents.create_agent(%{})
+    test "rejects create without user_id" do
+      assert {:error, :forbidden} = Agents.create_agent(%{})
+    end
+
+    test "validates required fields", %{owner: owner} do
+      assert {:error, changeset} = Agents.create_agent(%{user_id: owner.id})
       errors = errors_on(changeset)
       assert "can't be blank" in errors.name
-      assert "can't be blank" in errors.user_id
     end
 
     test "validates strategy inclusion", %{owner: owner} do

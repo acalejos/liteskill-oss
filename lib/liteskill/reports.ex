@@ -26,22 +26,24 @@ defmodule Liteskill.Reports do
   # --- Reports CRUD ---
 
   def create_report(user_id, title, opts \\ []) do
-    run_id = Keyword.get(opts, :run_id)
+    with :ok <- Liteskill.Rbac.authorize(user_id, "reports:create") do
+      run_id = Keyword.get(opts, :run_id)
 
-    attrs =
-      %{title: title, user_id: user_id}
-      |> then(fn a -> if run_id, do: Map.put(a, :run_id, run_id), else: a end)
+      attrs =
+        %{title: title, user_id: user_id}
+        |> then(fn a -> if run_id, do: Map.put(a, :run_id, run_id), else: a end)
 
-    Repo.transaction(fn ->
-      report =
-        %Report{}
-        |> Report.changeset(attrs)
-        |> Repo.insert!()
+      Repo.transaction(fn ->
+        report =
+          %Report{}
+          |> Report.changeset(attrs)
+          |> Repo.insert!()
 
-      {:ok, _} = Authorization.create_owner_acl("report", report.id, user_id)
+        {:ok, _} = Authorization.create_owner_acl("report", report.id, user_id)
 
-      report
-    end)
+        report
+      end)
+    end
   end
 
   def list_reports(user_id) do

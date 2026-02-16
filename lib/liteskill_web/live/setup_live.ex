@@ -3,6 +3,7 @@ defmodule LiteskillWeb.SetupLive do
 
   alias Liteskill.Accounts
   alias Liteskill.DataSources
+  alias Liteskill.Rbac
   alias LiteskillWeb.SourcesComponents
 
   @impl true
@@ -14,6 +15,7 @@ defmodule LiteskillWeb.SetupLive do
        step: :password,
        form: to_form(%{"password" => "", "password_confirmation" => ""}, as: :setup),
        error: nil,
+       selected_permissions: MapSet.new(Rbac.Permissions.default_permissions()),
        data_sources: DataSources.available_source_types(),
        selected_sources: MapSet.new(),
        sources_to_configure: [],
@@ -29,6 +31,8 @@ defmodule LiteskillWeb.SetupLive do
       <%= cond do %>
         <% @step == :password -> %>
           <.password_step form={@form} error={@error} />
+        <% @step == :default_permissions -> %>
+          <.default_permissions_step selected_permissions={@selected_permissions} />
         <% @step == :data_sources -> %>
           <.data_sources_step
             data_sources={@data_sources}
@@ -99,6 +103,54 @@ defmodule LiteskillWeb.SetupLive do
     """
   end
 
+  attr :selected_permissions, :any, required: true
+
+  defp default_permissions_step(assigns) do
+    grouped = Rbac.Permissions.grouped()
+    assigns = assign(assigns, :grouped_permissions, grouped)
+
+    ~H"""
+    <div class="card bg-base-100 shadow-xl w-full max-w-2xl">
+      <div class="card-body">
+        <h2 class="card-title text-2xl">Default User Permissions</h2>
+        <p class="text-base-content/70">
+          Choose the baseline permissions that all users receive by default.
+          You can always change this later in Admin &gt; Roles.
+        </p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <%= for {category, perms} <- @grouped_permissions do %>
+            <div class="border border-base-300 rounded-lg p-3">
+              <h4 class="font-semibold text-sm mb-2 capitalize">{category}</h4>
+              <%= for perm <- perms do %>
+                <label class="flex items-center gap-2 py-0.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    phx-click="toggle_permission"
+                    phx-value-permission={perm}
+                    checked={MapSet.member?(@selected_permissions, perm)}
+                    class="checkbox checkbox-sm"
+                  />
+                  <span class="text-xs">{perm}</span>
+                </label>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+
+        <div class="flex gap-3 mt-8">
+          <button type="button" phx-click="skip_permissions" class="btn btn-ghost flex-1">
+            Skip
+          </button>
+          <button type="button" phx-click="save_permissions" class="btn btn-primary flex-1">
+            Save & Continue
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   attr :data_sources, :list, required: true
   attr :selected_sources, :any, required: true
 
@@ -112,39 +164,48 @@ defmodule LiteskillWeb.SetupLive do
         </p>
 
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-6">
-          <button
-            :for={source <- @data_sources}
-            type="button"
-            phx-click="toggle_source"
-            phx-value-source-type={source.source_type}
-            class={[
-              "flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 transition-all duration-200 cursor-pointer",
-              if(MapSet.member?(@selected_sources, source.source_type),
-                do: "bg-success/15 border-success shadow-md",
-                else: "bg-base-100 border-base-300 hover:border-base-content/30"
-              ),
-              "hover:scale-105"
-            ]}
-          >
-            <div class={[
-              "size-12 flex items-center justify-center",
-              if(MapSet.member?(@selected_sources, source.source_type),
-                do: "text-success",
-                else: "text-base-content/70"
-              )
-            ]}>
-              <SourcesComponents.source_type_icon source_type={source.source_type} />
-            </div>
-            <span class={[
-              "text-sm font-medium",
-              if(MapSet.member?(@selected_sources, source.source_type),
-                do: "text-success",
-                else: "text-base-content"
-              )
-            ]}>
-              {source.name}
-            </span>
-          </button>
+          <%= for source <- @data_sources do %>
+            <% coming_soon = source.source_type in ~w(sharepoint confluence jira github gitlab) %>
+            <button
+              type="button"
+              phx-click={unless(coming_soon, do: "toggle_source")}
+              phx-value-source-type={source.source_type}
+              disabled={coming_soon}
+              class={[
+                "flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 transition-all duration-200",
+                cond do
+                  coming_soon ->
+                    "border-base-300 opacity-50 cursor-not-allowed"
+
+                  MapSet.member?(@selected_sources, source.source_type) ->
+                    "bg-success/15 border-success shadow-md"
+
+                  true ->
+                    "bg-base-100 border-base-300 hover:border-base-content/30 cursor-pointer hover:scale-105"
+                end
+              ]}
+            >
+              <div class={[
+                "size-12 flex items-center justify-center",
+                if(MapSet.member?(@selected_sources, source.source_type),
+                  do: "text-success",
+                  else: "text-base-content/70"
+                )
+              ]}>
+                <SourcesComponents.source_type_icon source_type={source.source_type} />
+              </div>
+              <span class={[
+                "text-sm font-medium",
+                if(MapSet.member?(@selected_sources, source.source_type),
+                  do: "text-success",
+                  else: "text-base-content"
+                )
+              ]}>
+                {source.name}
+              </span>
+              <span :if={coming_soon} class="badge badge-xs badge-ghost">Coming Soon</span>
+            </button>
+          <% end %>
         </div>
 
         <div class="flex gap-3 mt-8">
@@ -237,12 +298,43 @@ defmodule LiteskillWeb.SetupLive do
           {:ok, user} ->
             {:noreply,
              socket
-             |> assign(step: :data_sources, current_user: user, error: nil)}
+             |> assign(step: :default_permissions, current_user: user, error: nil)}
 
           {:error, _changeset} ->
             {:noreply, assign(socket, error: "Failed to set password. Please try again.")}
         end
     end
+  end
+
+  @impl true
+  def handle_event("toggle_permission", %{"permission" => permission}, socket) do
+    selected = socket.assigns.selected_permissions
+
+    selected =
+      if MapSet.member?(selected, permission),
+        do: MapSet.delete(selected, permission),
+        else: MapSet.put(selected, permission)
+
+    {:noreply, assign(socket, selected_permissions: selected)}
+  end
+
+  @impl true
+  def handle_event("save_permissions", _params, socket) do
+    permissions = MapSet.to_list(socket.assigns.selected_permissions)
+    role = Rbac.get_role_by_name!("Default")
+
+    case Rbac.update_role(role, %{permissions: permissions}) do
+      {:ok, _} ->
+        {:noreply, assign(socket, step: :data_sources)}
+
+      {:error, _} ->
+        {:noreply, assign(socket, error: "Failed to update permissions")}
+    end
+  end
+
+  @impl true
+  def handle_event("skip_permissions", _params, socket) do
+    {:noreply, assign(socket, step: :data_sources)}
   end
 
   @impl true

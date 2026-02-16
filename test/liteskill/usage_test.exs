@@ -657,4 +657,145 @@ defmodule Liteskill.UsageTest do
       assert results == []
     end
   end
+
+  # --- Embedding Usage ---
+
+  defp create_embedding_model(user) do
+    {:ok, provider} =
+      Liteskill.LlmProviders.create_provider(%{
+        name: "Embed Test Provider #{System.unique_integer([:positive])}",
+        provider_type: "amazon_bedrock",
+        api_key: "test-key",
+        provider_config: %{"region" => "us-east-1"},
+        user_id: user.id
+      })
+
+    {:ok, model} =
+      Liteskill.LlmModels.create_model(%{
+        name: "Cohere Embed Test",
+        model_id: "cohere.embed-v4",
+        model_type: "embedding",
+        instance_wide: true,
+        input_cost_per_million: Decimal.new("0.1"),
+        provider_id: provider.id,
+        user_id: user.id
+      })
+
+    model
+  end
+
+  defp insert_embedding_request(user_id, overrides \\ %{}) do
+    attrs =
+      Map.merge(
+        %{
+          request_type: "embed",
+          status: "success",
+          latency_ms: 150,
+          input_count: 5,
+          token_count: 500,
+          model_id: "cohere.embed-v4",
+          user_id: user_id
+        },
+        overrides
+      )
+
+    %Liteskill.Rag.EmbeddingRequest{}
+    |> Liteskill.Rag.EmbeddingRequest.changeset(attrs)
+    |> Repo.insert!()
+  end
+
+  describe "embedding_totals/1" do
+    test "returns aggregate embedding usage with cost", %{user: user} do
+      _model = create_embedding_model(user)
+
+      insert_embedding_request(user.id, %{token_count: 100, input_count: 5})
+      insert_embedding_request(user.id, %{token_count: 200, input_count: 10, status: "error"})
+
+      result = Usage.embedding_totals()
+
+      assert result.request_count >= 2
+      assert result.total_tokens >= 300
+      assert result.total_inputs >= 15
+      assert result.error_count >= 1
+      # 300 tokens * $0.1/M = $0.00003
+      assert Decimal.compare(result.estimated_cost, Decimal.new("0")) == :gt
+    end
+
+    test "returns zero cost when no model configured", %{user: user} do
+      insert_embedding_request(user.id, %{model_id: "nonexistent-model", token_count: 100})
+
+      result = Usage.embedding_totals()
+
+      assert result.total_tokens >= 100
+      assert Decimal.equal?(result.estimated_cost, Decimal.new("0"))
+    end
+
+    test "filters by time range", %{user: user} do
+      insert_embedding_request(user.id)
+
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+      result = Usage.embedding_totals(from: future)
+
+      assert result.request_count == 0
+      assert result.total_tokens == 0
+    end
+  end
+
+  describe "embedding_by_model/1" do
+    test "groups by model_id with cost", %{user: user} do
+      _model = create_embedding_model(user)
+
+      insert_embedding_request(user.id, %{model_id: "cohere.embed-v4", token_count: 1_000_000})
+      insert_embedding_request(user.id, %{model_id: "cohere.embed-v4", token_count: 1_000_000})
+
+      results = Usage.embedding_by_model()
+
+      row = Enum.find(results, &(&1.model_id == "cohere.embed-v4"))
+
+      assert row.request_count == 2
+      assert row.total_tokens == 2_000_000
+      # 2M tokens * $0.1/M = $0.2
+      assert Decimal.equal?(Decimal.round(row.estimated_cost, 1), Decimal.new("0.2"))
+    end
+
+    test "filters by time range", %{user: user} do
+      insert_embedding_request(user.id)
+
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+      assert Usage.embedding_by_model(from: future) == []
+    end
+  end
+
+  describe "embedding_by_user/1" do
+    test "groups by user_id with cost", %{user: user} do
+      _model = create_embedding_model(user)
+
+      {:ok, user2} =
+        Liteskill.Accounts.find_or_create_from_oidc(%{
+          email: "embed-user2-#{System.unique_integer([:positive])}@example.com",
+          name: "Embed User2",
+          oidc_sub: "embed-user2-#{System.unique_integer([:positive])}",
+          oidc_issuer: "https://test.example.com"
+        })
+
+      insert_embedding_request(user.id, %{token_count: 300})
+      insert_embedding_request(user2.id, %{token_count: 100})
+
+      results = Usage.embedding_by_user()
+
+      user1_row = Enum.find(results, &(&1.user_id == user.id))
+      user2_row = Enum.find(results, &(&1.user_id == user2.id))
+
+      assert user1_row.total_tokens == 300
+      assert user2_row.total_tokens == 100
+      assert Decimal.compare(user1_row.estimated_cost, Decimal.new("0")) == :gt
+    end
+
+    test "filters by time range", %{user: user} do
+      insert_embedding_request(user.id)
+
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+      assert Usage.embedding_by_user(from: future) == []
+    end
+  end
 end

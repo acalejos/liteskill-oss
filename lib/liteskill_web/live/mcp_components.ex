@@ -41,39 +41,45 @@ defmodule LiteskillWeb.McpComponents do
           <span class="badge badge-xs badge-info">global</span>
         </div>
         <div class="card-actions justify-end mt-2">
-          <button
-            phx-click="inspect_tools"
-            phx-value-id={@server.id}
-            class="btn btn-ghost btn-xs"
-          >
-            <.icon name="hero-code-bracket-micro" class="size-4" /> Tools
-          </button>
-          <button
-            :if={@owned && !@builtin?}
-            phx-click="open_sharing"
-            phx-value-entity-type="mcp_server"
-            phx-value-entity-id={@server.id}
-            class="btn btn-ghost btn-xs"
-          >
-            <.icon name="hero-share-micro" class="size-4" /> Share
-          </button>
-          <button
-            :if={@owned && !@builtin?}
-            phx-click="edit_mcp"
-            phx-value-id={@server.id}
-            class="btn btn-ghost btn-xs"
-          >
-            <.icon name="hero-pencil-square-micro" class="size-4" /> Edit
-          </button>
-          <button
-            :if={@owned && !@builtin?}
-            phx-click="delete_mcp"
-            phx-value-id={@server.id}
-            data-confirm="Delete this server?"
-            class="btn btn-ghost btn-xs text-error"
-          >
-            <.icon name="hero-trash-micro" class="size-4" /> Delete
-          </button>
+          <div class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-ghost btn-xs gap-1">
+              <.icon name="hero-ellipsis-horizontal-micro" class="size-4" /> Actions
+            </div>
+            <ul
+              tabindex="0"
+              class="dropdown-content menu menu-sm bg-base-200 rounded-lg shadow-lg z-10 w-40 p-1"
+            >
+              <li>
+                <button phx-click="inspect_tools" phx-value-id={@server.id}>
+                  <.icon name="hero-code-bracket-micro" class="size-4" /> Tools
+                </button>
+              </li>
+              <li :if={@owned && !@builtin?}>
+                <button
+                  phx-click="open_sharing"
+                  phx-value-entity-type="mcp_server"
+                  phx-value-entity-id={@server.id}
+                >
+                  <.icon name="hero-share-micro" class="size-4" /> Share
+                </button>
+              </li>
+              <li :if={@owned && !@builtin?}>
+                <button phx-click="edit_mcp" phx-value-id={@server.id}>
+                  <.icon name="hero-pencil-square-micro" class="size-4" /> Edit
+                </button>
+              </li>
+              <li :if={@owned && !@builtin?}>
+                <button
+                  phx-click="delete_mcp"
+                  phx-value-id={@server.id}
+                  data-confirm="Delete this server?"
+                  class="text-error"
+                >
+                  <.icon name="hero-trash-micro" class="size-4" /> Delete
+                </button>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>

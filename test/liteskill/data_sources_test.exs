@@ -250,6 +250,33 @@ defmodule Liteskill.DataSourcesTest do
     end
   end
 
+  describe "get_source_by_type/2" do
+    test "returns source when it exists", %{owner: owner} do
+      {:ok, source} =
+        DataSources.create_source(
+          %{name: "My GitHub", source_type: "github", description: ""},
+          owner.id
+        )
+
+      found = DataSources.get_source_by_type(owner.id, "github")
+      assert found.id == source.id
+    end
+
+    test "returns nil when no source of that type exists", %{owner: owner} do
+      assert DataSources.get_source_by_type(owner.id, "sharepoint") == nil
+    end
+
+    test "does not return other user's source", %{owner: owner, other: other} do
+      {:ok, _} =
+        DataSources.create_source(
+          %{name: "Owner GitHub", source_type: "github", description: ""},
+          owner.id
+        )
+
+      assert DataSources.get_source_by_type(other.id, "github") == nil
+    end
+  end
+
   describe "delete_source/2" do
     test "deletes own DB source", %{owner: owner} do
       {:ok, source} =

@@ -17,7 +17,7 @@ Reference for the most commonly used Mix commands in the Liteskill project.
 | `mix test` | Run all tests. Automatically creates and migrates the test database if needed. |
 | `mix test test/path_test.exs` | Run a single test file. |
 | `mix test --failed` | Re-run only tests that failed in the previous run. |
-| `mix precommit` | Run the full precommit suite: compile with warnings-as-errors, remove unused dependency locks, check formatting, and run all tests. **Always run this after completing changes.** |
+| `mix precommit` | Run the full precommit suite: compile with warnings-as-errors, remove unused dependency locks, check formatting, run all tests, and build the documentation book. **Always run this after completing changes.** |
 
 ## Database Commands
 
@@ -51,6 +51,7 @@ The `mix precommit` task runs the following steps in sequence:
 2. **`mix deps.unlock --unused`** -- Removes unused dependencies from the lock file
 3. **`mix format`** -- Formats all Elixir source files
 4. **`mix test`** -- Runs the full test suite with coverage
+5. **`mdbook build docs/`** -- Builds the mdBook documentation site
 
 If any step fails, the command exits with a non-zero status. This is the recommended command to run before pushing changes:
 

@@ -9,18 +9,20 @@ defmodule Liteskill.Groups do
   import Ecto.Query
 
   def create_group(name, creator_id) do
-    Repo.transaction(fn ->
-      group =
-        %Group{}
-        |> Group.changeset(%{name: name, created_by: creator_id})
+    with :ok <- Liteskill.Rbac.authorize(creator_id, "groups:create") do
+      Repo.transaction(fn ->
+        group =
+          %Group{}
+          |> Group.changeset(%{name: name, created_by: creator_id})
+          |> Repo.insert!()
+
+        %GroupMembership{}
+        |> GroupMembership.changeset(%{group_id: group.id, user_id: creator_id, role: "owner"})
         |> Repo.insert!()
 
-      %GroupMembership{}
-      |> GroupMembership.changeset(%{group_id: group.id, user_id: creator_id, role: "owner"})
-      |> Repo.insert!()
-
-      group
-    end)
+        group
+      end)
+    end
   end
 
   def list_groups(user_id) do
@@ -107,6 +109,10 @@ defmodule Liteskill.Groups do
       nil -> {:error, :not_found}
       group -> {:ok, group}
     end
+  end
+
+  def admin_get_group_by_name(name) do
+    Repo.one(from g in Group, where: g.name == ^name)
   end
 
   def admin_list_members(group_id) do

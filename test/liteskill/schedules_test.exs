@@ -56,13 +56,16 @@ defmodule Liteskill.SchedulesTest do
       assert Liteskill.Authorization.is_owner?("schedule", schedule.id, owner.id)
     end
 
-    test "validates required fields" do
-      assert {:error, changeset} = Schedules.create_schedule(%{})
+    test "rejects create without user_id" do
+      assert {:error, :forbidden} = Schedules.create_schedule(%{})
+    end
+
+    test "validates required fields", %{owner: owner} do
+      assert {:error, changeset} = Schedules.create_schedule(%{user_id: owner.id})
       errors = errors_on(changeset)
       assert "can't be blank" in errors.name
       assert "can't be blank" in errors.cron_expression
       assert "can't be blank" in errors.prompt
-      assert "can't be blank" in errors.user_id
     end
 
     test "validates cron expression format", %{owner: owner} do

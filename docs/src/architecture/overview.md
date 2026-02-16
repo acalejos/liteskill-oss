@@ -75,7 +75,7 @@ The business logic is organized into Phoenix contexts, each representing a bound
 | **Accounts** | `Liteskill.Accounts` | User management, dual authentication (OIDC via ueberauth + password via Argon2), invitation system |
 | **Authorization** | `Liteskill.Authorization` | Centralized entity ACL system (owner, manager, editor, viewer roles), user-based and group-based access |
 | **Groups** | `Liteskill.Groups` | Group management and membership, used for group-based ACL authorization |
-| **LLM** | `Liteskill.Llm` | LLM client abstraction, streaming with event store integration, tool calling orchestration, RAG context injection |
+| **LLM** | `Liteskill.LLM` | LLM client abstraction (via ReqLLM), streaming with event store integration, tool calling orchestration, RAG context injection |
 | **LLM Providers** | `Liteskill.LlmProviders` | Provider endpoint configurations (API keys, provider types), environment-based provider auto-setup |
 | **LLM Models** | `Liteskill.LlmModels` | Model definitions tied to providers, model types (inference, embedding, rerank), cost tracking |
 | **MCP Servers** | `Liteskill.McpServers` | MCP server registration, JSON-RPC 2.0 client for `tools/list` and `tools/call` |
@@ -87,6 +87,7 @@ The business logic is organized into Phoenix contexts, each representing a bound
 | **Schedules** | `Liteskill.Schedules` | Cron-based scheduling for recurring run execution, with ScheduleTick GenServer for due-schedule detection |
 | **Data Sources** | `Liteskill.DataSources` | External data source connectors (Google Drive, Wiki), sync workers, content extraction |
 | **Usage** | `Liteskill.Usage` | LLM token usage and cost tracking per user, conversation, model, and run |
+| **RBAC** | `Liteskill.Rbac` | Role-based access control for system-wide actions (permissions, role assignments to users and groups) |
 | **Settings** | `Liteskill.Settings` | Server-wide singleton settings (registration open/closed) |
 
 ## Background Jobs (Oban)
@@ -139,6 +140,8 @@ lib/
     llm_providers.ex            # LlmProviders context
     mcp_servers/                # McpServer schema, Client
     mcp_servers.ex              # McpServers context
+    rbac/                       # Role, UserRole, GroupRole, Permissions
+    rbac.ex                     # RBAC context
     rag/                        # Collection, Source, Document, Chunk, Pipeline, CohereClient
     rag.ex                      # RAG context
     reports/                    # Report, ReportSection, SectionComment
@@ -150,6 +153,7 @@ lib/
     settings/                   # ServerSettings schema
     settings.ex                 # Settings context (singleton)
     teams/                      # TeamDefinition, TeamMember
+    teams.ex                    # Teams context
     usage/                      # UsageRecord schema
     application.ex              # OTP Application (supervision tree)
     repo.ex                     # Ecto Repo
@@ -165,7 +169,7 @@ lib/
 
 priv/
   repo/
-    migrations/                 # 43 Ecto migrations
+    migrations/                 # 46 Ecto migrations
     seeds.exs                   # Database seed data
 
 config/
@@ -188,4 +192,6 @@ config/
 | Authentication | ueberauth (OIDC), Argon2 (password) |
 | Encryption | AES-256-GCM (at-rest field encryption) |
 | HTTP Client | Req |
+| LLM Client | ReqLLM (56+ providers) |
+| Agent Framework | Jido |
 | Tooling | mise (version management) |

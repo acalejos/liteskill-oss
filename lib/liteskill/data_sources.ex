@@ -190,19 +190,30 @@ defmodule Liteskill.DataSources do
     end
   end
 
-  def create_source(attrs, user_id) do
-    Repo.transaction(fn ->
-      case %Source{}
-           |> Source.changeset(Map.put(attrs, :user_id, user_id))
-           |> Repo.insert() do
-        {:ok, source} ->
-          {:ok, _} = Authorization.create_owner_acl("source", source.id, user_id)
-          source
+  @doc "Returns the first source owned by the user with the given source_type, or nil."
+  @spec get_source_by_type(Ecto.UUID.t(), String.t()) :: Source.t() | nil
+  def get_source_by_type(user_id, source_type) do
+    Source
+    |> where([s], s.user_id == ^user_id and s.source_type == ^source_type)
+    |> limit(1)
+    |> Repo.one()
+  end
 
-        {:error, changeset} ->
-          Repo.rollback(changeset)
-      end
-    end)
+  def create_source(attrs, user_id) do
+    with :ok <- Liteskill.Rbac.authorize(user_id, "sources:create") do
+      Repo.transaction(fn ->
+        case %Source{}
+             |> Source.changeset(Map.put(attrs, :user_id, user_id))
+             |> Repo.insert() do
+          {:ok, source} ->
+            {:ok, _} = Authorization.create_owner_acl("source", source.id, user_id)
+            source
+
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
+      end)
+    end
   end
 
   def update_source("builtin:" <> _, _attrs, _user_id), do: {:error, :cannot_update_builtin}

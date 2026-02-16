@@ -671,4 +671,42 @@ defmodule Liteskill.Rag do
   end
 
   defp maybe_hash_content(attrs), do: attrs
+
+  # --- Re-embedding support ---
+
+  @doc """
+  Returns the total number of chunks across all collections.
+  """
+  def total_chunk_count do
+    Repo.aggregate(Chunk, :count, :id)
+  end
+
+  @doc """
+  Clears all embeddings from all chunks and resets embedded documents to pending.
+  Returns `{:ok, %{chunks_cleared: n, documents_reset: n}}`.
+  """
+  def clear_all_embeddings do
+    {chunks_cleared, _} =
+      from(c in Chunk, where: not is_nil(c.embedding))
+      |> Repo.update_all(set: [embedding: nil])
+
+    {documents_reset, _} =
+      from(d in Document, where: d.status == "embedded")
+      |> Repo.update_all(set: [status: "pending"])
+
+    {:ok, %{chunks_cleared: chunks_cleared, documents_reset: documents_reset}}
+  end
+
+  @doc """
+  Returns documents that need re-embedding (pending status with chunks), paginated.
+  """
+  def list_documents_for_reembedding(limit, offset) do
+    from(d in Document,
+      where: d.status == "pending" and d.chunk_count > 0,
+      order_by: [asc: d.inserted_at],
+      limit: ^limit,
+      offset: ^offset
+    )
+    |> Repo.all()
+  end
 end

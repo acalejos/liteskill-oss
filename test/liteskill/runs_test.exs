@@ -65,12 +65,15 @@ defmodule Liteskill.RunsTest do
       assert run.team_definition.id == team.id
     end
 
-    test "validates required fields" do
-      assert {:error, changeset} = Runs.create_run(%{})
+    test "rejects create without user_id" do
+      assert {:error, :forbidden} = Runs.create_run(%{})
+    end
+
+    test "validates required fields", %{owner: owner} do
+      assert {:error, changeset} = Runs.create_run(%{user_id: owner.id})
       errors = errors_on(changeset)
       assert "can't be blank" in errors.name
       assert "can't be blank" in errors.prompt
-      assert "can't be blank" in errors.user_id
     end
 
     test "validates topology inclusion", %{owner: owner} do

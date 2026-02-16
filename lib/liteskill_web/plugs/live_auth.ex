@@ -42,7 +42,7 @@ defmodule LiteskillWeb.Plugs.LiveAuth do
             {:halt, redirect(socket, to: "/login")}
 
           user ->
-            if User.admin?(user) do
+            if Liteskill.Rbac.has_any_admin_permission?(user.id) do
               {:cont, assign(socket, :current_user, user)}
             else
               {:halt, redirect(socket, to: "/")}

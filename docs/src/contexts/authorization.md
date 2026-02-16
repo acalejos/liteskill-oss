@@ -4,6 +4,8 @@ Module: `Liteskill.Authorization`
 
 Centralized authorization context for all entity types. Provides access checks, role queries, ACL management, and composable query helpers that other contexts delegate to.
 
+> **Note:** This context handles **per-resource** access control (e.g., "can this user view this specific conversation?"). For **system-wide** action permissions (e.g., "can this user create conversations?"), see the [RBAC context](rbac.md).
+
 ## Role Hierarchy
 
 ```
@@ -21,13 +23,13 @@ viewer < editor < manager < owner
 
 - `agent_definition`
 - `conversation`
-- `data_source`
 - `run`
 - `llm_model`
 - `llm_provider`
 - `mcp_server`
 - `report`
 - `schedule`
+- `source`
 - `team_definition`
 - `wiki_space`
 

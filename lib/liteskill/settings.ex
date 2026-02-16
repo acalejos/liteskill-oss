@@ -31,6 +31,14 @@ defmodule Liteskill.Settings do
     get().registration_open
   end
 
+  def embedding_enabled? do
+    get().embedding_model_id != nil
+  end
+
+  def update_embedding_model(model_id) do
+    update(%{embedding_model_id: model_id})
+  end
+
   def update(attrs) do
     result =
       load_from_db()
@@ -39,6 +47,7 @@ defmodule Liteskill.Settings do
 
     case result do
       {:ok, settings} ->
+        settings = Repo.preload(settings, :embedding_model, force: true)
         # coveralls-ignore-next-line
         if @cache_enabled, do: :persistent_term.put(@cache_key, settings)
         {:ok, settings}
@@ -71,10 +80,11 @@ defmodule Liteskill.Settings do
         )
 
         # Re-query to handle race: another process may have inserted first
-        Repo.one!(from s in ServerSettings, limit: 1)
+        Repo.one!(from(s in ServerSettings, limit: 1))
+        |> Repo.preload(:embedding_model)
 
       settings ->
-        settings
+        Repo.preload(settings, :embedding_model)
     end
   end
 

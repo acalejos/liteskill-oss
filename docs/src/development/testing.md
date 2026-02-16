@@ -14,7 +14,7 @@ mix test test/path_test.exs
 # Re-run only previously failed tests
 mix test --failed
 
-# Run precommit checks (compile + format + test)
+# Run precommit checks (compile + format + test + build docs)
 mix precommit
 ```
 
@@ -95,21 +95,33 @@ config :argon2_elixir, t_cost: 1, m_cost: 8
 
 ## HTTP Mocking with Req.Test
 
-All HTTP calls use the [Req](https://hex.pm/packages/req) library. In tests, use `Req.Test` to mock HTTP responses by passing the `plug` option:
+HTTP calls that use the [Req](https://hex.pm/packages/req) library directly (MCP client, Cohere embeddings) are mocked using `Req.Test` stubs by passing the `plug` option:
 
 ```elixir
-Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
-  Req.Test.json(conn, %{"output" => %{"message" => %{"content" => [%{"text" => "Hello"}]}}})
+Req.Test.stub(Liteskill.Rag.CohereClient, fn conn ->
+  Req.Test.json(conn, %{"embeddings" => %{"float" => [[0.1, 0.2]]}})
 end)
 ```
 
 The corresponding production code passes the plug option:
 
 ```elixir
-Req.new(plug: {Req.Test, Liteskill.LLM.BedrockClient})
+Req.new(plug: {Req.Test, Liteskill.Rag.CohereClient})
 ```
 
-> **Important:** `Req.Test` does NOT trigger `into:` callbacks. Streaming responses that use `into:` must be tested differently or the `into:` option must be omitted when the test plug is active.
+### LLM Call Mocking
+
+LLM calls go through ReqLLM and are tested using function overrides rather than Req.Test stubs. The `StreamHandler` accepts a `:stream_fn` option, and `LLM.complete/2` accepts a `:generate_fn` option:
+
+```elixir
+# Mock a streaming LLM call
+stream_fn = fn _model_id, _messages, on_chunk, _opts ->
+  on_chunk.("Hello!")
+  {:ok, "Hello!", []}
+end
+
+StreamHandler.handle_stream(stream_id, messages, stream_fn: stream_fn)
+```
 
 ### MCP Client Testing
 
@@ -150,17 +162,16 @@ For tests that need different responses across multiple calls (e.g., retry behav
 ```elixir
 {:ok, agent} = Agent.start_link(fn -> [:error, :ok] end)
 
-Req.Test.stub(Liteskill.LLM.BedrockClient, fn conn ->
+stream_fn = fn _model_id, _messages, on_chunk, _opts ->
   response = Agent.get_and_update(agent, fn [head | tail] -> {head, tail} end)
 
   case response do
-    :error ->
-      conn |> Plug.Conn.send_resp(429, "rate limited")
-
+    :error -> {:error, %{status: 429}}
     :ok ->
-      Req.Test.json(conn, %{"output" => %{"message" => %{"content" => [%{"text" => "Hi"}]}}})
+      on_chunk.("Hi")
+      {:ok, "Hi", []}
   end
-end)
+end
 ```
 
 ### Retry Tests
@@ -168,7 +179,8 @@ end)
 When testing retry behavior, set a minimal backoff to keep tests fast:
 
 ```elixir
-StreamHandler.converse_stream(conversation_id, user_id, messages,
+StreamHandler.handle_stream(stream_id, messages,
+  stream_fn: retry_stream_fn,
   backoff_ms: 1
 )
 ```
@@ -185,7 +197,7 @@ config :liteskill, Oban, testing: :manual
 This prevents jobs from running automatically. Use `Oban.Testing` helpers to assert jobs were enqueued and execute them explicitly:
 
 ```elixir
-assert_enqueued(worker: Liteskill.Workers.IngestWorker)
+assert_enqueued(worker: Liteskill.Rag.IngestWorker)
 ```
 
 ## Settings Cache

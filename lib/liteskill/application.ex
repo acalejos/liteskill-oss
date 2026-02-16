@@ -28,6 +28,7 @@ defmodule Liteskill.Application do
             {Task,
              fn ->
                Liteskill.Accounts.ensure_admin_user()
+               Liteskill.Rbac.ensure_system_roles()
                Liteskill.LlmProviders.ensure_env_providers()
                Liteskill.Settings.get()
              end}

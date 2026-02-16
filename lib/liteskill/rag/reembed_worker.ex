@@ -1,0 +1,90 @@
+defmodule Liteskill.Rag.ReembedWorker do
+  @moduledoc """
+  Oban worker that re-embeds all chunks using the currently configured embedding model.
+
+  Processes documents in batches. Each job handles one batch and enqueues the
+  next batch if more documents remain.
+  """
+
+  use Oban.Worker, queue: :rag_ingest, max_attempts: 3
+
+  alias Liteskill.Rag
+  alias Liteskill.Rag.{Chunk, CohereClient, Document}
+  alias Liteskill.Repo
+  alias Liteskill.Settings
+
+  import Ecto.Query
+
+  @batch_size 10
+
+  @impl Oban.Worker
+  def perform(%Oban.Job{args: args}) do
+    user_id = Map.fetch!(args, "user_id")
+    batch = Map.get(args, "batch", 0)
+
+    if not Settings.embedding_enabled?() do
+      {:cancel, "embedding_disabled"}
+    else
+      documents = Rag.list_documents_for_reembedding(@batch_size, 0)
+
+      if documents == [] do
+        :ok
+      else
+        Enum.each(documents, fn doc ->
+          reembed_document(doc, user_id, args)
+        end)
+
+        # Self-chain: enqueue next batch if more documents remain
+        remaining = Rag.list_documents_for_reembedding(1, 0)
+
+        if remaining != [] do
+          %{"user_id" => user_id, "batch" => batch + 1}
+          |> __MODULE__.new()
+          |> Oban.insert()
+        end
+
+        :ok
+      end
+    end
+  end
+
+  defp reembed_document(document, user_id, args) do
+    chunks =
+      from(c in Chunk, where: c.document_id == ^document.id, order_by: c.position)
+      |> Repo.all()
+
+    if chunks == [] do
+      document
+      |> Document.changeset(%{status: "embedded"})
+      |> Repo.update()
+    else
+      texts = Enum.map(chunks, & &1.content)
+      plug = Map.get(args, "plug", false)
+
+      embed_opts =
+        [input_type: "search_document", dimensions: 1024, user_id: user_id] ++
+          if(plug, do: [plug: {Req.Test, CohereClient}], else: [])
+
+      case CohereClient.embed(texts, embed_opts) do
+        {:ok, embeddings} ->
+          Repo.transaction(fn ->
+            Enum.zip(chunks, embeddings)
+            |> Enum.each(fn {chunk, embedding} ->
+              chunk
+              |> Ecto.Changeset.change(%{embedding: Pgvector.new(embedding)})
+              |> Repo.update!()
+            end)
+
+            document
+            |> Document.changeset(%{status: "embedded"})
+            |> Repo.update!()
+          end)
+
+        {:error, _reason} ->
+          document
+          |> Document.changeset(%{status: "error"})
+          |> Repo.update()
+      end
+    end
+  end
+end

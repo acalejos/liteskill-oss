@@ -62,11 +62,14 @@ defmodule Liteskill.TeamsTest do
       assert Liteskill.Authorization.is_owner?("team_definition", team.id, owner.id)
     end
 
-    test "validates required fields" do
-      assert {:error, changeset} = Teams.create_team(%{})
+    test "rejects create without user_id" do
+      assert {:error, :forbidden} = Teams.create_team(%{})
+    end
+
+    test "validates required fields", %{owner: owner} do
+      assert {:error, changeset} = Teams.create_team(%{user_id: owner.id})
       errors = errors_on(changeset)
       assert "can't be blank" in errors.name
-      assert "can't be blank" in errors.user_id
     end
 
     test "validates topology inclusion", %{owner: owner} do

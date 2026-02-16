@@ -106,8 +106,8 @@ defmodule LiteskillWeb.ProfileLive do
               <div class="text-sm text-base-content/60 mb-1">Role</div>
               <span class={[
                 "badge",
-                User.admin?(@current_user) && "badge-primary",
-                !User.admin?(@current_user) && "badge-neutral"
+                @current_user.role == "admin" && "badge-primary",
+                @current_user.role != "admin" && "badge-neutral"
               ]}>
                 {String.capitalize(@current_user.role)}
               </span>

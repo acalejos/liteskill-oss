@@ -40,6 +40,7 @@
 - [Chat](contexts/chat.md)
 - [Accounts](contexts/accounts.md)
 - [Authorization](contexts/authorization.md)
+- [RBAC](contexts/rbac.md)
 - [Groups](contexts/groups.md)
 - [LLM](contexts/llm.md)
 - [MCP Servers](contexts/mcp-servers.md)

@@ -101,6 +101,8 @@ Hook: `{LiveAuth, :require_admin}` -- requires the authenticated user to have ad
 | `/admin/groups` | `ChatLive` | `:admin_groups` |
 | `/admin/providers` | `ChatLive` | `:admin_providers` |
 | `/admin/models` | `ChatLive` | `:admin_models` |
+| `/admin/roles` | `ChatLive` | `:admin_roles` |
+| `/admin/setup` | `ChatLive` | `:admin_setup` |
 
 #### `:chat` -- Main Authenticated Routes
 
@@ -122,7 +124,8 @@ Hook: `{LiveAuth, :require_authenticated}` -- requires a logged-in user, redirec
 | `/mcp` | `ChatLive` | `:mcp_servers` |
 | `/reports` | `ChatLive` | `:reports` |
 | `/reports/:report_id` | `ChatLive` | `:report_show` |
-| `/agents` | `ChatLive` | `:agents` |
+| `/agents` | `ChatLive` | `:agent_studio` |
+| `/agents/list` | `ChatLive` | `:agents` |
 | `/agents/new` | `ChatLive` | `:agent_new` |
 | `/agents/:agent_id` | `ChatLive` | `:agent_show` |
 | `/agents/:agent_id/edit` | `ChatLive` | `:agent_edit` |

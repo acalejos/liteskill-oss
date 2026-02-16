@@ -10,12 +10,14 @@ defmodule LiteskillWeb.AdminLive do
 
   alias Liteskill.Accounts
   alias Liteskill.Accounts.User
+  alias Liteskill.DataSources
   alias Liteskill.Groups
   alias Liteskill.LlmModels
   alias Liteskill.LlmProviders
   alias Liteskill.LlmProviders.LlmProvider
   alias Liteskill.Settings
   alias Liteskill.Usage
+  alias LiteskillWeb.SourcesComponents
 
   @admin_actions [
     :admin_usage,
@@ -23,7 +25,10 @@ defmodule LiteskillWeb.AdminLive do
     :admin_users,
     :admin_groups,
     :admin_providers,
-    :admin_models
+    :admin_models,
+    :admin_roles,
+    :admin_rag,
+    :admin_setup
   ]
 
   def admin_action?(action), do: action in @admin_actions
@@ -45,12 +50,34 @@ defmodule LiteskillWeb.AdminLive do
       invitations: [],
       new_invitation_url: nil,
       admin_usage_data: %{},
-      admin_usage_period: "30d"
+      admin_usage_period: "30d",
+      setup_step: :password,
+      setup_form: to_form(%{"password" => "", "password_confirmation" => ""}, as: :setup),
+      setup_error: nil,
+      setup_selected_permissions: MapSet.new(),
+      setup_data_sources: [],
+      setup_selected_sources: MapSet.new(),
+      setup_sources_to_configure: [],
+      setup_current_config_index: 0,
+      setup_config_form: to_form(%{}, as: :config),
+      rbac_roles: [],
+      editing_role: nil,
+      role_form: to_form(%{}, as: :role),
+      role_users: [],
+      role_groups: [],
+      role_user_search: "",
+      rag_embedding_models: [],
+      rag_current_model: nil,
+      rag_stats: %{},
+      rag_confirm_change: false,
+      rag_confirm_input: "",
+      rag_selected_model_id: nil,
+      rag_reembed_in_progress: false
     ]
   end
 
   def apply_admin_action(socket, action, user) do
-    if !User.admin?(user) do
+    if !Liteskill.Rbac.has_any_admin_permission?(user.id) do
       Phoenix.LiveView.push_navigate(socket, to: ~p"/profile")
     else
       load_tab_data(socket, action)
@@ -91,6 +118,35 @@ defmodule LiteskillWeb.AdminLive do
     )
   end
 
+  defp load_tab_data(socket, :admin_setup) do
+    user_id = socket.assigns.current_user.id
+    available = DataSources.available_source_types()
+
+    existing_types =
+      available
+      |> Enum.map(& &1.source_type)
+      |> Enum.filter(&DataSources.get_source_by_type(user_id, &1))
+      |> MapSet.new()
+
+    default_perms =
+      case Liteskill.Rbac.get_role_by_name!("Default") do
+        %{permissions: perms} -> MapSet.new(perms)
+      end
+
+    Phoenix.Component.assign(socket,
+      page_title: "Setup Wizard",
+      setup_step: :password,
+      setup_form: to_form(%{"password" => "", "password_confirmation" => ""}, as: :setup),
+      setup_error: nil,
+      setup_selected_permissions: default_perms,
+      setup_data_sources: available,
+      setup_selected_sources: existing_types,
+      setup_sources_to_configure: [],
+      setup_current_config_index: 0,
+      setup_config_form: to_form(%{}, as: :config)
+    )
+  end
+
   defp load_tab_data(socket, :admin_providers) do
     user_id = socket.assigns.current_user.id
 
@@ -111,6 +167,51 @@ defmodule LiteskillWeb.AdminLive do
       editing_llm_model: nil,
       llm_model_form: to_form(%{}, as: :llm_model),
       page_title: "Model Management"
+    )
+  end
+
+  defp load_tab_data(socket, :admin_roles) do
+    Phoenix.Component.assign(socket,
+      rbac_roles: Liteskill.Rbac.list_roles(),
+      editing_role: nil,
+      role_form: to_form(%{}, as: :role),
+      role_users: [],
+      role_groups: [],
+      role_user_search: "",
+      page_title: "Role Management"
+    )
+  end
+
+  defp load_tab_data(socket, :admin_rag) do
+    user_id = socket.assigns.current_user.id
+    settings = Settings.get()
+    embedding_models = LlmModels.list_active_models(user_id, model_type: "embedding")
+    stats = Liteskill.Rag.Pipeline.public_summary()
+    reembed_in_progress = reembed_jobs_in_progress?()
+
+    Phoenix.Component.assign(socket,
+      page_title: "RAG Settings",
+      server_settings: settings,
+      rag_embedding_models: embedding_models,
+      rag_current_model: settings.embedding_model,
+      rag_stats: stats,
+      rag_confirm_change: false,
+      rag_confirm_input: "",
+      rag_selected_model_id: nil,
+      rag_reembed_in_progress: reembed_in_progress
+    )
+  end
+
+  defp reembed_jobs_in_progress? do
+    import Ecto.Query
+
+    Liteskill.Repo.exists?(
+      from(j in "oban_jobs",
+        where:
+          j.queue == "rag_ingest" and
+            j.worker == "Liteskill.Rag.ReembedWorker" and
+            j.state in ["available", "executing", "scheduled"]
+      )
     )
   end
 
@@ -139,13 +240,20 @@ defmodule LiteskillWeb.AdminLive do
       end)
       |> Enum.sort_by(fn %{usage: u} -> u.total_tokens end, :desc)
 
+    embedding_totals = Usage.embedding_totals(time_opts)
+    embedding_by_model = Usage.embedding_by_model(time_opts)
+    embedding_by_user = Usage.embedding_by_user(time_opts)
+
     %{
       instance: instance,
       by_user: by_user,
       by_model: by_model,
       daily: daily,
       user_map: user_map,
-      group_usage: group_usage
+      group_usage: group_usage,
+      embedding_totals: embedding_totals,
+      embedding_by_model: embedding_by_model,
+      embedding_by_user: embedding_by_user
     }
   end
 
@@ -184,6 +292,28 @@ defmodule LiteskillWeb.AdminLive do
   attr :new_invitation_url, :string, default: nil
   attr :admin_usage_data, :map, default: %{}
   attr :admin_usage_period, :string, default: "30d"
+  attr :setup_step, :atom, default: :password
+  attr :setup_form, :any
+  attr :setup_error, :string, default: nil
+  attr :setup_selected_permissions, :any, default: nil
+  attr :setup_data_sources, :list, default: []
+  attr :setup_selected_sources, :any, default: nil
+  attr :setup_sources_to_configure, :list, default: []
+  attr :setup_current_config_index, :integer, default: 0
+  attr :setup_config_form, :any
+  attr :rbac_roles, :list, default: []
+  attr :editing_role, :any, default: nil
+  attr :role_form, :any
+  attr :role_users, :list, default: []
+  attr :role_groups, :list, default: []
+  attr :role_user_search, :string, default: ""
+  attr :rag_embedding_models, :list, default: []
+  attr :rag_current_model, :any, default: nil
+  attr :rag_stats, :map, default: %{}
+  attr :rag_confirm_change, :boolean, default: false
+  attr :rag_confirm_input, :string, default: ""
+  attr :rag_selected_model_id, :string, default: nil
+  attr :rag_reembed_in_progress, :boolean, default: false
 
   def admin_panel(assigns) do
     ~H"""
@@ -232,6 +362,16 @@ defmodule LiteskillWeb.AdminLive do
           to={~p"/admin/models"}
           active={@live_action == :admin_models}
         />
+        <.tab_link
+          label="Roles"
+          to={~p"/admin/roles"}
+          active={@live_action == :admin_roles}
+        />
+        <.tab_link
+          label="RAG"
+          to={~p"/admin/rag"}
+          active={@live_action == :admin_rag}
+        />
       </div>
     </div>
 
@@ -239,7 +379,15 @@ defmodule LiteskillWeb.AdminLive do
       <div class={[
         "mx-auto",
         if(
-          @live_action in [:admin_providers, :admin_models, :admin_users, :admin_groups, :admin_usage],
+          @live_action in [
+            :admin_providers,
+            :admin_models,
+            :admin_users,
+            :admin_groups,
+            :admin_usage,
+            :admin_roles,
+            :admin_rag
+          ],
           do: "max-w-6xl",
           else: "max-w-3xl"
         )
@@ -301,6 +449,75 @@ defmodule LiteskillWeb.AdminLive do
         user_map={@admin_usage_data[:user_map] || %{}}
       />
       <.usage_by_group data={@admin_usage_data[:group_usage] || []} />
+
+      <.embedding_usage_summary totals={@admin_usage_data[:embedding_totals]} />
+      <.embedding_usage_by_model data={@admin_usage_data[:embedding_by_model] || []} />
+      <.embedding_usage_by_user
+        data={@admin_usage_data[:embedding_by_user] || []}
+        user_map={@admin_usage_data[:user_map] || %{}}
+      />
+    </div>
+    """
+  end
+
+  # --- Setup Wizard Tab (admin) ---
+
+  defp render_tab(%{live_action: :admin_setup} = assigns) do
+    ~H"""
+    <div class="flex justify-center">
+      <div class="w-full max-w-2xl">
+        <div class="mb-4">
+          <.link navigate={~p"/admin/servers"} class="btn btn-ghost btn-sm gap-1">
+            <.icon name="hero-arrow-left-micro" class="size-4" /> Back to Server
+          </.link>
+        </div>
+
+        <div class="flex gap-2 mb-6">
+          <.setup_step_indicator
+            label="Password"
+            step={:password}
+            current={@setup_step}
+            index={1}
+          />
+          <.setup_step_indicator
+            label="Permissions"
+            step={:default_permissions}
+            current={@setup_step}
+            index={2}
+          />
+          <.setup_step_indicator
+            label="Data Sources"
+            step={:data_sources}
+            current={@setup_step}
+            index={3}
+          />
+          <.setup_step_indicator
+            label="Configure"
+            step={:configure_source}
+            current={@setup_step}
+            index={4}
+          />
+        </div>
+
+        <%= case @setup_step do %>
+          <% :password -> %>
+            <.setup_password_step form={@setup_form} error={@setup_error} />
+          <% :default_permissions -> %>
+            <.setup_default_permissions_step selected_permissions={@setup_selected_permissions} />
+          <% :data_sources -> %>
+            <.setup_data_sources_step
+              data_sources={@setup_data_sources}
+              selected_sources={@setup_selected_sources}
+            />
+          <% :configure_source -> %>
+            <.setup_configure_step
+              source={Enum.at(@setup_sources_to_configure, @setup_current_config_index)}
+              config_form={@setup_config_form}
+              current_index={@setup_current_config_index}
+              total={length(@setup_sources_to_configure)}
+            />
+        <% end %>
+      </div>
     </div>
     """
   end
@@ -320,6 +537,22 @@ defmodule LiteskillWeb.AdminLive do
 
     ~H"""
     <div class="space-y-6">
+      <div class="card bg-base-100 shadow">
+        <div class="card-body">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="card-title">Setup Wizard</h2>
+              <p class="text-sm text-base-content/60 mt-1">
+                Re-run the initial setup wizard to update admin password and data source connections.
+              </p>
+            </div>
+            <.link navigate={~p"/admin/setup"} class="btn btn-primary btn-sm gap-1">
+              <.icon name="hero-arrow-path-micro" class="size-4" /> Run Setup
+            </.link>
+          </div>
+        </div>
+      </div>
+
       <div class="card bg-base-100 shadow">
         <div class="card-body">
           <h2 class="card-title mb-4">Registration</h2>
@@ -486,8 +719,8 @@ defmodule LiteskillWeb.AdminLive do
                     <td>
                       <span class={[
                         "badge badge-sm",
-                        User.admin?(user) && "badge-primary",
-                        !User.admin?(user) && "badge-neutral"
+                        user.role == "admin" && "badge-primary",
+                        user.role != "admin" && "badge-neutral"
                       ]}>
                         {String.capitalize(user.role)}
                       </span>
@@ -497,7 +730,7 @@ defmodule LiteskillWeb.AdminLive do
                     </td>
                     <td class="flex gap-1">
                       <%= if user.email != User.admin_email() do %>
-                        <%= if User.admin?(user) do %>
+                        <%= if user.role == "admin" do %>
                           <button
                             phx-click="demote_user"
                             phx-value-id={user.id}
@@ -1151,6 +1384,662 @@ defmodule LiteskillWeb.AdminLive do
     """
   end
 
+  defp render_tab(%{live_action: :admin_roles} = assigns) do
+    grouped_permissions = Liteskill.Rbac.Permissions.grouped()
+    assigns = assign(assigns, :grouped_permissions, grouped_permissions)
+
+    ~H"""
+    <div class="space-y-6">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xl font-semibold">Role Management</h2>
+        <button phx-click="new_role" class="btn btn-primary btn-sm">
+          <.icon name="hero-plus-micro" class="size-4" /> New Role
+        </button>
+      </div>
+
+      <%!-- Role list --%>
+      <div class="overflow-x-auto">
+        <table class="table table-zebra w-full">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Type</th>
+              <th>Permissions</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <%= for role <- @rbac_roles do %>
+              <tr>
+                <td class="font-medium">{role.name}</td>
+                <td class="text-sm text-base-content/60">{role.description || "—"}</td>
+                <td>
+                  <span class={[
+                    "badge badge-sm",
+                    role.system && "badge-primary",
+                    !role.system && "badge-outline"
+                  ]}>
+                    {if role.system, do: "System", else: "Custom"}
+                  </span>
+                </td>
+                <td>
+                  <span class="badge badge-sm badge-ghost">
+                    {if "*" in role.permissions,
+                      do: "All",
+                      else: "#{length(role.permissions)} permissions"}
+                  </span>
+                </td>
+                <td class="flex gap-1">
+                  <button
+                    phx-click="edit_role"
+                    phx-value-id={role.id}
+                    class="btn btn-ghost btn-xs"
+                  >
+                    {if role.name == "Instance Admin", do: "View", else: "Edit"}
+                  </button>
+                  <button
+                    :if={!role.system}
+                    phx-click="delete_role"
+                    phx-value-id={role.id}
+                    data-confirm="Delete this role? Users and groups will lose its permissions."
+                    class="btn btn-ghost btn-xs text-error"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      </div>
+
+      <%!-- Role detail panel --%>
+      <%= if @editing_role do %>
+        <div class="card bg-base-100 shadow">
+          <div class="card-body">
+            <div class="flex items-center justify-between">
+              <h3 class="card-title">
+                {if @editing_role == :new, do: "New Role", else: @editing_role.name}
+              </h3>
+              <button type="button" phx-click="cancel_role" class="btn btn-ghost btn-sm">
+                Close
+              </button>
+            </div>
+
+            <%!-- Instance Admin: read-only view --%>
+            <%= if @editing_role != :new && @editing_role.name == "Instance Admin" do %>
+              <div class="alert alert-info">
+                <.icon name="hero-shield-check-micro" class="size-5" />
+                <span>
+                  The Instance Admin role always has full access to everything.
+                  Its permissions cannot be changed.
+                </span>
+              </div>
+              <div class="text-sm text-base-content/60">
+                {if @editing_role.description,
+                  do: @editing_role.description,
+                  else: "Full system access"}
+              </div>
+            <% else %>
+              <%!-- Editable form for all other roles --%>
+              <.form
+                for={@role_form}
+                phx-submit={if @editing_role == :new, do: "create_role", else: "update_role"}
+                class="space-y-4"
+              >
+                <input
+                  :if={@editing_role != :new}
+                  type="hidden"
+                  name="role[id]"
+                  value={@editing_role.id}
+                />
+
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Name</span></label>
+                  <input
+                    type="text"
+                    name="role[name]"
+                    value={Phoenix.HTML.Form.input_value(@role_form, :name)}
+                    class="input input-bordered"
+                    required
+                    disabled={@editing_role != :new && @editing_role.system}
+                  />
+                </div>
+
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Description</span></label>
+                  <input
+                    type="text"
+                    name="role[description]"
+                    value={Phoenix.HTML.Form.input_value(@role_form, :description)}
+                    class="input input-bordered"
+                  />
+                </div>
+
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Permissions</span></label>
+                  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <%= for {category, perms} <- @grouped_permissions do %>
+                      <div class="border border-base-300 rounded-lg p-3">
+                        <h4 class="font-semibold text-sm mb-2 capitalize">{category}</h4>
+                        <%= for perm <- perms do %>
+                          <label class="flex items-center gap-2 py-0.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              name="role[permissions][]"
+                              value={perm}
+                              checked={
+                                perm in (Phoenix.HTML.Form.input_value(@role_form, :permissions) ||
+                                           [])
+                              }
+                              class="checkbox checkbox-sm"
+                            />
+                            <span class="text-xs">{perm}</span>
+                          </label>
+                        <% end %>
+                      </div>
+                    <% end %>
+                  </div>
+                </div>
+
+                <div class="flex gap-2">
+                  <button type="submit" class="btn btn-primary btn-sm">
+                    {if @editing_role == :new, do: "Create", else: "Update"}
+                  </button>
+                  <button type="button" phx-click="cancel_role" class="btn btn-ghost btn-sm">
+                    Cancel
+                  </button>
+                </div>
+              </.form>
+            <% end %>
+
+            <%!-- User/Group assignments (only for existing roles) --%>
+            <%= if @editing_role != :new do %>
+              <div class="divider">Assigned Users</div>
+              <div class="space-y-2">
+                <form phx-submit="assign_role_user" class="flex gap-2">
+                  <input
+                    type="text"
+                    name="email"
+                    placeholder="User email"
+                    class="input input-bordered input-sm flex-1"
+                  />
+                  <button type="submit" class="btn btn-sm btn-primary">Add</button>
+                </form>
+                <div class="flex flex-wrap gap-2">
+                  <%= for user <- @role_users do %>
+                    <span class="badge badge-lg gap-2">
+                      {user.email}
+                      <button
+                        phx-click="remove_role_user"
+                        phx-value-user-id={user.id}
+                        class="btn btn-ghost btn-xs"
+                      >
+                        x
+                      </button>
+                    </span>
+                  <% end %>
+                </div>
+              </div>
+
+              <div class="divider">Assigned Groups</div>
+              <div class="space-y-2">
+                <form phx-submit="assign_role_group" class="flex gap-2">
+                  <input
+                    type="text"
+                    name="group_name"
+                    placeholder="Group name"
+                    class="input input-bordered input-sm flex-1"
+                  />
+                  <button type="submit" class="btn btn-sm btn-primary">Add</button>
+                </form>
+                <div class="flex flex-wrap gap-2">
+                  <%= for group <- @role_groups do %>
+                    <span class="badge badge-lg gap-2">
+                      {group.name}
+                      <button
+                        phx-click="remove_role_group"
+                        phx-value-group-id={group.id}
+                        class="btn btn-ghost btn-xs"
+                      >
+                        x
+                      </button>
+                    </span>
+                  <% end %>
+                </div>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  # --- RAG Tab ---
+
+  defp render_tab(%{live_action: :admin_rag} = assigns) do
+    ~H"""
+    <div class="space-y-6">
+      <div class="card bg-base-100 shadow">
+        <div class="card-body">
+          <h2 class="card-title">Embedding Model</h2>
+          <%= if @rag_current_model do %>
+            <div class="flex items-center gap-2 mt-2">
+              <span class="badge badge-success">Active</span>
+              <span class="font-medium">{@rag_current_model.name}</span>
+              <span class="text-sm text-base-content/60">({@rag_current_model.model_id})</span>
+            </div>
+          <% else %>
+            <div class="alert alert-warning mt-2">
+              <.icon name="hero-exclamation-triangle-micro" class="size-5" />
+              <span>No embedding model selected. RAG ingest is disabled.</span>
+            </div>
+          <% end %>
+        </div>
+      </div>
+
+      <div class="card bg-base-100 shadow">
+        <div class="card-body">
+          <h2 class="card-title">Pipeline Stats</h2>
+          <div class="stats stats-horizontal shadow mt-2">
+            <div class="stat">
+              <div class="stat-title">Sources</div>
+              <div class="stat-value text-lg">{@rag_stats[:source_count] || 0}</div>
+            </div>
+            <div class="stat">
+              <div class="stat-title">Documents</div>
+              <div class="stat-value text-lg">{@rag_stats[:document_count] || 0}</div>
+            </div>
+            <div class="stat">
+              <div class="stat-title">Chunks</div>
+              <div class="stat-value text-lg">{@rag_stats[:chunk_count] || 0}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div :if={@rag_reembed_in_progress} class="alert alert-info">
+        <.icon name="hero-arrow-path-micro" class="size-5 animate-spin" />
+        <span>Re-embedding is currently in progress. This may take a while.</span>
+      </div>
+
+      <div class="card bg-base-100 shadow">
+        <div class="card-body">
+          <h2 class="card-title">Change Embedding Model</h2>
+          <p class="text-sm text-base-content/60 mt-1">
+            Changing the model will clear <strong>all existing embeddings</strong>
+            and re-generate them using the new model. This is a destructive and
+            potentially time-consuming operation.
+          </p>
+
+          <%= if @rag_embedding_models == [] do %>
+            <div class="alert alert-warning mt-4">
+              <.icon name="hero-information-circle-micro" class="size-5" />
+              <span>
+                No embedding models configured. Add a model with type "embedding"
+                in the <.link navigate={~p"/admin/models"} class="link link-primary">Models</.link>
+                tab first.
+              </span>
+            </div>
+          <% else %>
+            <form phx-submit="rag_select_model" class="flex items-end gap-3 mt-4">
+              <div class="form-control flex-1">
+                <label class="label"><span class="label-text">Select Model</span></label>
+                <select name="model_id" class="select select-bordered w-full">
+                  <option value="">-- None (disable RAG) --</option>
+                  <option
+                    :for={model <- @rag_embedding_models}
+                    value={model.id}
+                    selected={@rag_current_model && model.id == @rag_current_model.id}
+                  >
+                    {model.name} ({model.model_id})
+                  </option>
+                </select>
+              </div>
+              <button
+                type="submit"
+                class="btn btn-warning"
+                disabled={@rag_reembed_in_progress}
+              >
+                Change Model
+              </button>
+            </form>
+          <% end %>
+        </div>
+      </div>
+
+      <%= if @rag_confirm_change do %>
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center"
+          phx-window-keydown="rag_cancel_change"
+          phx-key="Escape"
+        >
+          <div class="fixed inset-0 bg-black/50" phx-click="rag_cancel_change" />
+          <div class="relative bg-base-100 rounded-xl shadow-xl w-full max-w-lg mx-4 z-10">
+            <div class="p-6">
+              <h3 class="text-lg font-bold text-error flex items-center gap-2">
+                <.icon name="hero-exclamation-triangle-micro" class="size-6" /> Dangerous Operation
+              </h3>
+              <div class="mt-4 space-y-3">
+                <p class="text-sm text-base-content/70">
+                  This will <strong>permanently clear</strong>
+                  all <span class="font-bold text-error">{@rag_stats[:chunk_count] || 0}</span>
+                  chunk embeddings across
+                  <span class="font-bold">{@rag_stats[:document_count] || 0}</span>
+                  documents.
+                </p>
+                <p class="text-sm text-base-content/70">
+                  All RAG search will be unavailable until re-embedding completes.
+                  This may take a significant amount of time and will incur API costs.
+                </p>
+                <p class="text-sm font-medium mt-4">
+                  Type the following to confirm:
+                </p>
+                <code class="block bg-base-200 px-3 py-2 rounded text-sm select-all">
+                  I know what this means and I am very sure
+                </code>
+              </div>
+              <form phx-submit="rag_confirm_model_change" class="mt-4">
+                <input
+                  type="text"
+                  name="confirmation"
+                  value={@rag_confirm_input}
+                  phx-keyup="rag_confirm_input_change"
+                  class="input input-bordered w-full"
+                  autocomplete="off"
+                  placeholder="Type confirmation text..."
+                />
+                <div class="flex justify-end gap-2 mt-4">
+                  <button type="button" phx-click="rag_cancel_change" class="btn btn-ghost">
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    class={[
+                      "btn btn-error",
+                      @rag_confirm_input != "I know what this means and I am very sure" &&
+                        "btn-disabled"
+                    ]}
+                    disabled={@rag_confirm_input != "I know what this means and I am very sure"}
+                  >
+                    Confirm Change
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  # --- Setup Wizard Sub-Components ---
+
+  defp setup_step_indicator(assigns) do
+    status =
+      cond do
+        assigns.step == assigns.current -> :active
+        step_index(assigns.step) < step_index(assigns.current) -> :done
+        true -> :pending
+      end
+
+    assigns = assign(assigns, :status, status)
+
+    ~H"""
+    <div class="flex items-center gap-2 flex-1">
+      <div class={[
+        "size-6 rounded-full flex items-center justify-center text-xs font-bold",
+        case @status do
+          :done -> "bg-success text-success-content"
+          :active -> "bg-primary text-primary-content"
+          :pending -> "bg-base-300 text-base-content/50"
+        end
+      ]}>
+        <%= if @status == :done do %>
+          <.icon name="hero-check-micro" class="size-4" />
+        <% else %>
+          {@index}
+        <% end %>
+      </div>
+      <span class={[
+        "text-sm font-medium",
+        if(@status == :pending, do: "text-base-content/50", else: "text-base-content")
+      ]}>
+        {@label}
+      </span>
+      <div :if={@index < 4} class="flex-1 h-px bg-base-300" />
+    </div>
+    """
+  end
+
+  defp step_index(:password), do: 1
+  defp step_index(:default_permissions), do: 2
+  defp step_index(:data_sources), do: 3
+  defp step_index(:configure_source), do: 4
+
+  defp setup_password_step(assigns) do
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-xl">Admin Password</h2>
+        <p class="text-base-content/70">
+          Set or update the admin account password. Skip if no change is needed.
+        </p>
+
+        <.form for={@form} phx-submit="setup_password" class="mt-4 space-y-4">
+          <div class="form-control">
+            <label class="label"><span class="label-text">New Password</span></label>
+            <input
+              type="password"
+              name="setup[password]"
+              value={Phoenix.HTML.Form.input_value(@form, :password)}
+              placeholder="Minimum 12 characters"
+              class="input input-bordered w-full"
+              minlength="12"
+            />
+          </div>
+
+          <div class="form-control">
+            <label class="label"><span class="label-text">Confirm Password</span></label>
+            <input
+              type="password"
+              name="setup[password_confirmation]"
+              value={Phoenix.HTML.Form.input_value(@form, :password_confirmation)}
+              placeholder="Repeat password"
+              class="input input-bordered w-full"
+              minlength="12"
+            />
+          </div>
+
+          <p :if={@error} class="text-error text-sm">{@error}</p>
+
+          <div class="flex gap-3">
+            <button type="button" phx-click="setup_skip_password" class="btn btn-ghost flex-1">
+              Skip
+            </button>
+            <button type="submit" class="btn btn-primary flex-1">
+              Set Password & Continue
+            </button>
+          </div>
+        </.form>
+      </div>
+    </div>
+    """
+  end
+
+  defp setup_default_permissions_step(assigns) do
+    grouped = Liteskill.Rbac.Permissions.grouped()
+    assigns = assign(assigns, :grouped_permissions, grouped)
+
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-xl">Default User Permissions</h2>
+        <p class="text-base-content/70">
+          Choose the baseline permissions that all users receive by default.
+        </p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <%= for {category, perms} <- @grouped_permissions do %>
+            <div class="border border-base-300 rounded-lg p-3">
+              <h4 class="font-semibold text-sm mb-2 capitalize">{category}</h4>
+              <%= for perm <- perms do %>
+                <label class="flex items-center gap-2 py-0.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    phx-click="setup_toggle_permission"
+                    phx-value-permission={perm}
+                    checked={MapSet.member?(@selected_permissions, perm)}
+                    class="checkbox checkbox-sm"
+                  />
+                  <span class="text-xs">{perm}</span>
+                </label>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+
+        <div class="flex gap-3 mt-6">
+          <button type="button" phx-click="setup_skip_permissions" class="btn btn-ghost flex-1">
+            Skip
+          </button>
+          <button type="button" phx-click="setup_save_permissions" class="btn btn-primary flex-1">
+            Save & Continue
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp setup_data_sources_step(assigns) do
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-xl">Data Sources</h2>
+        <p class="text-base-content/70">
+          Select the data sources to integrate with. Already-connected sources are pre-selected.
+        </p>
+
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-6">
+          <%= for source <- @data_sources do %>
+            <% coming_soon = source.source_type in ~w(sharepoint confluence jira github gitlab) %>
+            <button
+              type="button"
+              phx-click={unless(coming_soon, do: "setup_toggle_source")}
+              phx-value-source-type={source.source_type}
+              disabled={coming_soon}
+              class={[
+                "flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 transition-all duration-200",
+                cond do
+                  coming_soon ->
+                    "border-base-300 opacity-50 cursor-not-allowed"
+
+                  MapSet.member?(@selected_sources, source.source_type) ->
+                    "bg-success/15 border-success shadow-md"
+
+                  true ->
+                    "bg-base-100 border-base-300 hover:border-base-content/30 cursor-pointer hover:scale-105"
+                end
+              ]}
+            >
+              <div class={[
+                "size-12 flex items-center justify-center",
+                if(MapSet.member?(@selected_sources, source.source_type),
+                  do: "text-success",
+                  else: "text-base-content/70"
+                )
+              ]}>
+                <SourcesComponents.source_type_icon source_type={source.source_type} />
+              </div>
+              <span class={[
+                "text-sm font-medium",
+                if(MapSet.member?(@selected_sources, source.source_type),
+                  do: "text-success",
+                  else: "text-base-content"
+                )
+              ]}>
+                {source.name}
+              </span>
+              <span :if={coming_soon} class="badge badge-xs badge-ghost">Coming Soon</span>
+            </button>
+          <% end %>
+        </div>
+
+        <div class="flex gap-3 mt-8">
+          <button phx-click="setup_skip_sources" class="btn btn-ghost flex-1">
+            Skip
+          </button>
+          <button phx-click="setup_save_sources" class="btn btn-primary flex-1">
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp setup_configure_step(assigns) do
+    config_fields = DataSources.config_fields_for(assigns.source.source_type)
+    assigns = assign(assigns, :config_fields, config_fields)
+
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex items-center justify-between">
+          <h2 class="card-title text-xl">Configure {@source.name}</h2>
+          <span class="text-sm text-base-content/50">
+            {@current_index + 1} of {@total}
+          </span>
+        </div>
+        <p class="text-base-content/70">
+          Enter connection details for {@source.name}. Skip to keep existing config.
+        </p>
+
+        <div class="flex justify-center my-4">
+          <div class="size-16">
+            <SourcesComponents.source_type_icon source_type={@source.source_type} />
+          </div>
+        </div>
+
+        <.form for={@config_form} phx-submit="setup_save_config" class="space-y-4">
+          <div :for={field <- @config_fields} class="form-control">
+            <label class="label"><span class="label-text">{field.label}</span></label>
+            <%= if field.type == :textarea do %>
+              <textarea
+                name={"config[#{field.key}]"}
+                placeholder={field.placeholder}
+                class="textarea textarea-bordered w-full"
+                rows="4"
+              >{Phoenix.HTML.Form.input_value(@config_form, field.key)}</textarea>
+            <% else %>
+              <input
+                type={if field.type == :password, do: "password", else: "text"}
+                name={"config[#{field.key}]"}
+                value={Phoenix.HTML.Form.input_value(@config_form, field.key)}
+                placeholder={field.placeholder}
+                class="input input-bordered w-full"
+              />
+            <% end %>
+          </div>
+
+          <div class="flex gap-3 mt-6">
+            <button type="button" phx-click="setup_skip_config" class="btn btn-ghost flex-1">
+              Skip
+            </button>
+            <button type="submit" class="btn btn-primary flex-1">
+              Save & Continue
+            </button>
+          </div>
+        </.form>
+      </div>
+    </div>
+    """
+  end
+
   # --- Usage Sub-Components ---
 
   defp usage_instance_summary(assigns) do
@@ -1370,6 +2259,115 @@ defmodule LiteskillWeb.AdminLive do
     """
   end
 
+  # --- Embedding Usage Components ---
+
+  defp embedding_usage_summary(%{totals: nil} = assigns) do
+    ~H"""
+    """
+  end
+
+  defp embedding_usage_summary(assigns) do
+    error_rate =
+      if assigns.totals.request_count > 0 do
+        Float.round(assigns.totals.error_count / assigns.totals.request_count * 100, 1)
+      else
+        0.0
+      end
+
+    avg_ms = trunc(Decimal.to_float(assigns.totals.avg_latency_ms))
+    assigns = assign(assigns, error_rate: error_rate, avg_ms: avg_ms)
+
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h3 class="card-title text-base mb-4">Embedding & Rerank Usage</h3>
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-4">
+          <.stat_card label="Requests" value={format_number(@totals.request_count)} />
+          <.stat_card label="Total Tokens" value={format_number(@totals.total_tokens)} />
+          <.stat_card label="Inputs Processed" value={format_number(@totals.total_inputs)} />
+          <.stat_card label="Est. Cost" value={format_cost(@totals.estimated_cost)} />
+          <.stat_card label="Avg Latency" value={"#{@avg_ms}ms"} />
+          <.stat_card label="Error Rate" value={"#{@error_rate}%"} />
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp embedding_usage_by_model(assigns) do
+    ~H"""
+    <div :if={@data != []} class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h3 class="card-title text-base mb-4">Embedding Usage by Model</h3>
+        <div class="overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th class="text-right">Requests</th>
+                <th class="text-right">Tokens</th>
+                <th class="text-right">Inputs</th>
+                <th class="text-right">Est. Cost</th>
+                <th class="text-right">Errors</th>
+                <th class="text-right">Avg Latency</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={row <- @data}>
+                <td class="font-medium font-mono text-xs">{row.model_id}</td>
+                <td class="text-right">{format_number(row.request_count)}</td>
+                <td class="text-right">{format_number(row.total_tokens)}</td>
+                <td class="text-right">{format_number(row.total_inputs)}</td>
+                <td class="text-right">{format_cost(row.estimated_cost)}</td>
+                <td class="text-right">{row.error_count}</td>
+                <td class="text-right">{trunc(Decimal.to_float(row.avg_latency_ms))}ms</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp embedding_usage_by_user(assigns) do
+    ~H"""
+    <div :if={@data != []} class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h3 class="card-title text-base mb-4">Embedding Usage by User</h3>
+        <div class="overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th class="text-right">Requests</th>
+                <th class="text-right">Tokens</th>
+                <th class="text-right">Inputs</th>
+                <th class="text-right">Est. Cost</th>
+                <th class="text-right">Errors</th>
+                <th class="text-right">Avg Latency</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={row <- @data}>
+                <td class="font-medium">
+                  {if user = @user_map[row.user_id], do: user.email, else: "Unknown"}
+                </td>
+                <td class="text-right">{format_number(row.request_count)}</td>
+                <td class="text-right">{format_number(row.total_tokens)}</td>
+                <td class="text-right">{format_number(row.total_inputs)}</td>
+                <td class="text-right">{format_cost(row.estimated_cost)}</td>
+                <td class="text-right">{row.error_count}</td>
+                <td class="text-right">{trunc(Decimal.to_float(row.avg_latency_ms))}ms</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   # --- Helpers ---
 
   defp info_row(assigns) do
@@ -1413,15 +2411,226 @@ defmodule LiteskillWeb.AdminLive do
     if total == 0, do: 0, else: Float.round(tokens / total * 100, 0)
   end
 
-  # --- Event Handlers (called from ChatLive) ---
-
   defp require_admin(socket, fun) do
-    if User.admin?(socket.assigns.current_user) do
+    if Liteskill.Rbac.has_any_admin_permission?(socket.assigns.current_user.id) do
       fun.()
     else
       {:noreply, socket}
     end
   end
+
+  defp setup_advance_config(socket) do
+    next_index = socket.assigns.setup_current_config_index + 1
+    sources = socket.assigns.setup_sources_to_configure
+
+    if next_index >= length(sources) do
+      {:noreply, Phoenix.LiveView.push_navigate(socket, to: ~p"/admin/servers")}
+    else
+      user_id = socket.assigns.current_user.id
+      next_source = Enum.at(sources, next_index)
+
+      existing_metadata =
+        case DataSources.get_source(next_source.db_id, user_id) do
+          {:ok, s} -> s.metadata || %{}
+          _ -> %{}
+        end
+
+      {:noreply,
+       Phoenix.Component.assign(socket,
+         setup_current_config_index: next_index,
+         setup_config_form: to_form(existing_metadata, as: :config)
+       )}
+    end
+  end
+
+  # --- Setup Wizard Event Handlers ---
+
+  def handle_event("setup_password", %{"setup" => params}, socket) do
+    require_admin(socket, fn ->
+      password = params["password"]
+      confirmation = params["password_confirmation"]
+
+      cond do
+        password != confirmation ->
+          {:noreply, Phoenix.Component.assign(socket, setup_error: "Passwords do not match")}
+
+        String.length(password) < 12 ->
+          {:noreply,
+           Phoenix.Component.assign(socket,
+             setup_error: "Password must be at least 12 characters"
+           )}
+
+        true ->
+          case Accounts.setup_admin_password(socket.assigns.current_user, password) do
+            {:ok, user} ->
+              {:noreply,
+               Phoenix.Component.assign(socket,
+                 setup_step: :default_permissions,
+                 current_user: user,
+                 setup_error: nil
+               )}
+
+            {:error, _changeset} ->
+              {:noreply,
+               Phoenix.Component.assign(socket,
+                 setup_error: "Failed to set password. Please try again."
+               )}
+          end
+      end
+    end)
+  end
+
+  def handle_event("setup_skip_password", _params, socket) do
+    require_admin(socket, fn ->
+      {:noreply,
+       Phoenix.Component.assign(socket, setup_step: :default_permissions, setup_error: nil)}
+    end)
+  end
+
+  def handle_event("setup_toggle_permission", %{"permission" => permission}, socket) do
+    require_admin(socket, fn ->
+      selected = socket.assigns.setup_selected_permissions
+
+      selected =
+        if MapSet.member?(selected, permission),
+          do: MapSet.delete(selected, permission),
+          else: MapSet.put(selected, permission)
+
+      {:noreply, Phoenix.Component.assign(socket, setup_selected_permissions: selected)}
+    end)
+  end
+
+  def handle_event("setup_save_permissions", _params, socket) do
+    require_admin(socket, fn ->
+      permissions = MapSet.to_list(socket.assigns.setup_selected_permissions)
+      role = Liteskill.Rbac.get_role_by_name!("Default")
+
+      case Liteskill.Rbac.update_role(role, %{permissions: permissions}) do
+        {:ok, _} ->
+          {:noreply, Phoenix.Component.assign(socket, setup_step: :data_sources)}
+
+        {:error, _} ->
+          {:noreply,
+           Phoenix.Component.assign(socket, setup_error: "Failed to update permissions")}
+      end
+    end)
+  end
+
+  def handle_event("setup_skip_permissions", _params, socket) do
+    require_admin(socket, fn ->
+      {:noreply, Phoenix.Component.assign(socket, setup_step: :data_sources)}
+    end)
+  end
+
+  def handle_event("setup_toggle_source", %{"source-type" => source_type}, socket) do
+    require_admin(socket, fn ->
+      selected = socket.assigns.setup_selected_sources
+
+      selected =
+        if MapSet.member?(selected, source_type),
+          do: MapSet.delete(selected, source_type),
+          else: MapSet.put(selected, source_type)
+
+      {:noreply, Phoenix.Component.assign(socket, setup_selected_sources: selected)}
+    end)
+  end
+
+  def handle_event("setup_save_sources", _params, socket) do
+    require_admin(socket, fn ->
+      user_id = socket.assigns.current_user.id
+      selected = socket.assigns.setup_selected_sources
+      data_sources = socket.assigns.setup_data_sources
+
+      sources_to_configure =
+        Enum.filter(data_sources, &MapSet.member?(selected, &1.source_type))
+
+      if sources_to_configure == [] do
+        {:noreply, Phoenix.LiveView.push_navigate(socket, to: ~p"/admin/servers")}
+      else
+        {configured, _error} =
+          Enum.reduce(sources_to_configure, {[], nil}, fn source, {acc, err} ->
+            if err do
+              {acc, err}
+            else
+              case DataSources.get_source_by_type(user_id, source.source_type) do
+                %{id: id} ->
+                  {[Map.put(source, :db_id, id) | acc], nil}
+
+                nil ->
+                  case DataSources.create_source(
+                         %{
+                           name: source.name,
+                           source_type: source.source_type,
+                           description: ""
+                         },
+                         user_id
+                       ) do
+                    {:ok, db_source} ->
+                      {[Map.put(source, :db_id, db_source.id) | acc], nil}
+
+                    {:error, _} ->
+                      {acc, "Failed to create source: #{source.name}"}
+                  end
+              end
+            end
+          end)
+
+        sources = Enum.reverse(configured)
+        first = hd(sources)
+
+        existing_metadata =
+          case DataSources.get_source(first.db_id, user_id) do
+            {:ok, s} -> s.metadata || %{}
+            _ -> %{}
+          end
+
+        {:noreply,
+         Phoenix.Component.assign(socket,
+           setup_step: :configure_source,
+           setup_sources_to_configure: sources,
+           setup_current_config_index: 0,
+           setup_config_form: to_form(existing_metadata, as: :config)
+         )}
+      end
+    end)
+  end
+
+  def handle_event("setup_save_config", %{"config" => config_params}, socket) do
+    require_admin(socket, fn ->
+      current_source =
+        Enum.at(
+          socket.assigns.setup_sources_to_configure,
+          socket.assigns.setup_current_config_index
+        )
+
+      user_id = socket.assigns.current_user.id
+
+      metadata =
+        config_params
+        |> Enum.reject(fn {_k, v} -> v == "" end)
+        |> Map.new()
+
+      if metadata != %{} do
+        DataSources.update_source(current_source.db_id, %{metadata: metadata}, user_id)
+      end
+
+      setup_advance_config(socket)
+    end)
+  end
+
+  def handle_event("setup_skip_config", _params, socket) do
+    require_admin(socket, fn ->
+      setup_advance_config(socket)
+    end)
+  end
+
+  def handle_event("setup_skip_sources", _params, socket) do
+    require_admin(socket, fn ->
+      {:noreply, Phoenix.LiveView.push_navigate(socket, to: ~p"/admin/servers")}
+    end)
+  end
+
+  # --- Event Handlers (called from ChatLive) ---
 
   def handle_event("admin_usage_period", %{"period" => period}, socket) do
     require_admin(socket, fn ->
@@ -1836,6 +3045,311 @@ defmodule LiteskillWeb.AdminLive do
           {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Failed to delete model")}
       end
     end)
+  end
+
+  # --- Role event handlers ---
+
+  def handle_event("new_role", _params, socket) do
+    require_admin(socket, fn ->
+      {:noreply,
+       Phoenix.Component.assign(socket,
+         editing_role: :new,
+         role_form: to_form(%{}, as: :role)
+       )}
+    end)
+  end
+
+  def handle_event("cancel_role", _params, socket) do
+    require_admin(socket, fn ->
+      {:noreply, Phoenix.Component.assign(socket, editing_role: nil)}
+    end)
+  end
+
+  def handle_event("edit_role", %{"id" => id}, socket) do
+    require_admin(socket, fn ->
+      case Liteskill.Rbac.get_role(id) do
+        {:ok, role} ->
+          form_data = %{
+            "name" => role.name,
+            "description" => role.description || "",
+            "permissions" => role.permissions
+          }
+
+          {:noreply,
+           Phoenix.Component.assign(socket,
+             editing_role: role,
+             role_form: to_form(form_data, as: :role),
+             role_users: Liteskill.Rbac.list_role_users(role.id),
+             role_groups: Liteskill.Rbac.list_role_groups(role.id)
+           )}
+
+        {:error, _} ->
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Role not found")}
+      end
+    end)
+  end
+
+  def handle_event("create_role", %{"role" => params}, socket) do
+    require_admin(socket, fn ->
+      attrs = %{
+        name: params["name"],
+        description: params["description"],
+        permissions: params["permissions"] || []
+      }
+
+      case Liteskill.Rbac.create_role(attrs) do
+        {:ok, _} ->
+          {:noreply,
+           socket
+           |> Phoenix.Component.assign(
+             rbac_roles: Liteskill.Rbac.list_roles(),
+             editing_role: nil
+           )
+           |> Phoenix.LiveView.put_flash(:info, "Role created")}
+
+        {:error, changeset} ->
+          msg = format_changeset_error(changeset)
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, msg)}
+      end
+    end)
+  end
+
+  def handle_event("update_role", %{"role" => params}, socket) do
+    require_admin(socket, fn ->
+      role = socket.assigns.editing_role
+
+      attrs = %{
+        name: params["name"],
+        description: params["description"],
+        permissions: params["permissions"] || []
+      }
+
+      case Liteskill.Rbac.update_role(role, attrs) do
+        {:ok, updated} ->
+          {:noreply,
+           socket
+           |> Phoenix.Component.assign(
+             rbac_roles: Liteskill.Rbac.list_roles(),
+             editing_role: updated,
+             role_form:
+               to_form(
+                 %{
+                   "name" => updated.name,
+                   "description" => updated.description || "",
+                   "permissions" => updated.permissions
+                 },
+                 as: :role
+               )
+           )
+           |> Phoenix.LiveView.put_flash(:info, "Role updated")}
+
+        {:error, changeset} ->
+          msg = format_changeset_error(changeset)
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, msg)}
+      end
+    end)
+  end
+
+  def handle_event("delete_role", %{"id" => id}, socket) do
+    require_admin(socket, fn ->
+      case Liteskill.Rbac.get_role(id) do
+        {:ok, role} ->
+          case Liteskill.Rbac.delete_role(role) do
+            {:ok, _} ->
+              {:noreply,
+               socket
+               |> Phoenix.Component.assign(
+                 rbac_roles: Liteskill.Rbac.list_roles(),
+                 editing_role: nil
+               )
+               |> Phoenix.LiveView.put_flash(:info, "Role deleted")}
+
+            {:error, :cannot_delete_system_role} ->
+              {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Cannot delete system roles")}
+
+            {:error, _} ->
+              {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Failed to delete role")}
+          end
+
+        {:error, _} ->
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Role not found")}
+      end
+    end)
+  end
+
+  def handle_event("assign_role_user", %{"email" => email}, socket) do
+    require_admin(socket, fn ->
+      role = socket.assigns.editing_role
+
+      case Accounts.get_user_by_email(email) do
+        nil ->
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, "User not found")}
+
+        user ->
+          case Liteskill.Rbac.assign_role_to_user(user.id, role.id) do
+            {:ok, _} ->
+              {:noreply,
+               Phoenix.Component.assign(socket,
+                 role_users: Liteskill.Rbac.list_role_users(role.id)
+               )}
+
+            {:error, _} ->
+              {:noreply, Phoenix.LiveView.put_flash(socket, :error, "User already has this role")}
+          end
+      end
+    end)
+  end
+
+  def handle_event("remove_role_user", %{"user-id" => user_id}, socket) do
+    require_admin(socket, fn ->
+      role = socket.assigns.editing_role
+
+      case Liteskill.Rbac.remove_role_from_user(user_id, role.id) do
+        {:ok, _} ->
+          {:noreply,
+           Phoenix.Component.assign(socket,
+             role_users: Liteskill.Rbac.list_role_users(role.id)
+           )}
+
+        {:error, :cannot_remove_root_admin} ->
+          {:noreply,
+           Phoenix.LiveView.put_flash(
+             socket,
+             :error,
+             "Cannot remove Instance Admin from root admin"
+           )}
+
+        {:error, _} ->
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Failed to remove user")}
+      end
+    end)
+  end
+
+  def handle_event("assign_role_group", %{"group_name" => name}, socket) do
+    require_admin(socket, fn ->
+      role = socket.assigns.editing_role
+
+      case Groups.admin_get_group_by_name(name) do
+        nil ->
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Group not found")}
+
+        group ->
+          case Liteskill.Rbac.assign_role_to_group(group.id, role.id) do
+            {:ok, _} ->
+              {:noreply,
+               Phoenix.Component.assign(socket,
+                 role_groups: Liteskill.Rbac.list_role_groups(role.id)
+               )}
+
+            {:error, _} ->
+              {:noreply,
+               Phoenix.LiveView.put_flash(socket, :error, "Group already has this role")}
+          end
+      end
+    end)
+  end
+
+  def handle_event("remove_role_group", %{"group-id" => group_id}, socket) do
+    require_admin(socket, fn ->
+      role = socket.assigns.editing_role
+
+      case Liteskill.Rbac.remove_role_from_group(group_id, role.id) do
+        {:ok, _} ->
+          {:noreply,
+           Phoenix.Component.assign(socket,
+             role_groups: Liteskill.Rbac.list_role_groups(role.id)
+           )}
+
+        {:error, _} ->
+          {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Failed to remove group")}
+      end
+    end)
+  end
+
+  # --- RAG Tab Event Handlers ---
+
+  def handle_event("rag_select_model", %{"model_id" => model_id}, socket) do
+    require_admin(socket, fn ->
+      current_id =
+        case socket.assigns.rag_current_model do
+          %{id: id} -> id
+          _ -> nil
+        end
+
+      selected_id = if model_id == "", do: nil, else: model_id
+
+      if selected_id == current_id do
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :info, "Model is already set to this value")}
+      else
+        {:noreply,
+         Phoenix.Component.assign(socket,
+           rag_confirm_change: true,
+           rag_confirm_input: "",
+           rag_selected_model_id: selected_id
+         )}
+      end
+    end)
+  end
+
+  def handle_event("rag_cancel_change", _params, socket) do
+    {:noreply,
+     Phoenix.Component.assign(socket,
+       rag_confirm_change: false,
+       rag_confirm_input: "",
+       rag_selected_model_id: nil
+     )}
+  end
+
+  def handle_event("rag_confirm_input_change", %{"value" => value}, socket) do
+    {:noreply, Phoenix.Component.assign(socket, rag_confirm_input: value)}
+  end
+
+  def handle_event("rag_confirm_model_change", %{"confirmation" => confirmation}, socket) do
+    require_admin(socket, fn ->
+      if confirmation != "I know what this means and I am very sure" do
+        {:noreply, Phoenix.LiveView.put_flash(socket, :error, "Confirmation text does not match")}
+      else
+        selected_id = socket.assigns.rag_selected_model_id
+        user_id = socket.assigns.current_user.id
+
+        case Settings.update_embedding_model(selected_id) do
+          {:ok, _settings} ->
+            Liteskill.Rag.clear_all_embeddings()
+
+            if selected_id do
+              Liteskill.Rag.ReembedWorker.new(%{"user_id" => user_id})
+              |> Oban.insert()
+            end
+
+            socket =
+              socket
+              |> load_tab_data(:admin_rag)
+              |> Phoenix.LiveView.put_flash(
+                :info,
+                if(selected_id,
+                  do: "Embedding model updated. Re-embedding started.",
+                  else: "Embedding model cleared. RAG ingest is now disabled."
+                )
+              )
+
+            {:noreply, socket}
+
+          {:error, _} ->
+            {:noreply,
+             Phoenix.LiveView.put_flash(socket, :error, "Failed to update embedding model")}
+        end
+      end
+    end)
+  end
+
+  defp format_changeset_error(changeset) do
+    Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
+      Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
+        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      end)
+    end)
+    |> Enum.map_join(", ", fn {field, msgs} -> "#{field}: #{Enum.join(msgs, ", ")}" end)
   end
 
   @doc false
