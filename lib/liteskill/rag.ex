@@ -511,11 +511,28 @@ defmodule Liteskill.Rag do
     end
   end
 
-  def list_chunks_for_document(rag_document_id) do
-    Chunk
-    |> where([c], c.document_id == ^rag_document_id)
-    |> order_by([c], asc: c.position)
-    |> Repo.all()
+  def list_chunks_for_document(rag_document_id, user_id) do
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
+    case Repo.one(
+           from(d in Document,
+             where:
+               d.id == ^rag_document_id and
+                 (d.user_id == ^user_id or
+                    fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(
+                      wiki_space_ids
+                    ))
+           )
+         ) do
+      %Document{} ->
+        Chunk
+        |> where([c], c.document_id == ^rag_document_id)
+        |> order_by([c], asc: c.position)
+        |> Repo.all()
+
+      nil ->
+        []
+    end
   end
 
   def delete_document_chunks(document_id) do

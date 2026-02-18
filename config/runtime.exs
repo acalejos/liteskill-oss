@@ -31,6 +31,22 @@ if System.get_env("OIDC_CLIENT_ID") do
     client_secret: System.get_env("OIDC_CLIENT_SECRET")
 end
 
+# ReqLLM connection pool — increase default Finch pool size for LLM concurrency.
+# Key must be :finch (not :finch_options) — that's what ReqLLM.Application reads.
+#
+# Timeouts: stream_receive_timeout controls the idle timeout between streaming chunks
+# (including time-to-first-token after sending a large context). Default 30s is too
+# short for tool-calling rounds where the LLM must process prior tool inputs/outputs.
+config :req_llm,
+  stream_receive_timeout: 120_000,
+  receive_timeout: 120_000,
+  finch: [
+    name: ReqLLM.Finch,
+    pools: %{
+      :default => [protocols: [:http1], size: 25, count: 1]
+    }
+  ]
+
 # AWS Bedrock configuration (all environments)
 bedrock_overrides =
   [

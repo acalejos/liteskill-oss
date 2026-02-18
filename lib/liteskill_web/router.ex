@@ -81,6 +81,8 @@ defmodule LiteskillWeb.Router do
       live "/c/:conversation_id", ChatLive, :show
       live "/profile", ChatLive, :info
       live "/profile/password", ChatLive, :password
+      live "/profile/providers", ChatLive, :user_providers
+      live "/profile/models", ChatLive, :user_models
       live "/wiki", WikiLive, :wiki
       live "/wiki/:document_id", WikiLive, :wiki_page_show
       live "/sources", ChatLive, :sources

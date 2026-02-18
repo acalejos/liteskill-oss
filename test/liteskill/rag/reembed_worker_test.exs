@@ -90,7 +90,7 @@ defmodule Liteskill.Rag.ReembedWorkerTest do
       updated_doc = Repo.get!(Document, doc.id)
       assert updated_doc.status == "embedded"
 
-      chunks = Rag.list_chunks_for_document(doc.id)
+      chunks = Rag.list_chunks_for_document(doc.id, owner.id)
 
       Enum.each(chunks, fn chunk ->
         assert chunk.embedding != nil

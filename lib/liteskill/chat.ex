@@ -29,7 +29,7 @@ defmodule Liteskill.Chat do
 
   alias Liteskill.Aggregate.Loader
   alias Liteskill.Authorization
-  alias Liteskill.Chat.{Conversation, ConversationAggregate, Message, Projector}
+  alias Liteskill.Chat.{Conversation, ConversationAggregate, Message, MessageChunk, Projector}
   alias Liteskill.EventStore.Postgres, as: Store
   alias Liteskill.Repo
 
@@ -301,6 +301,17 @@ defmodule Liteskill.Chat do
           msg |> Message.changeset(%{rag_sources: rag_sources}) |> Repo.update()
         end
     end
+  end
+
+  @doc """
+  Deletes all message chunks for a given message.
+
+  Called internally by StreamHandler to clean up orphaned chunks before
+  retrying a failed stream.
+  """
+  def delete_message_chunks(message_id) do
+    from(c in MessageChunk, where: c.message_id == ^message_id)
+    |> Repo.delete_all()
   end
 
   def get_conversation_tree(conversation_id, user_id) do

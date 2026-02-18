@@ -76,7 +76,8 @@ defmodule Liteskill.Runs.RunnerTest do
         name: "Test Model #{System.unique_integer([:positive])}",
         model_id: "claude-3-5-sonnet-20241022",
         provider_id: provider.id,
-        user_id: owner.id
+        user_id: owner.id,
+        instance_wide: true
       })
 
     model

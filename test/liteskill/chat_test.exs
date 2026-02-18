@@ -66,7 +66,8 @@ defmodule Liteskill.ChatTest do
           name: "Test Model",
           model_id: "us.anthropic.claude-3-5-sonnet",
           provider_id: provider.id,
-          user_id: user.id
+          user_id: user.id,
+          instance_wide: true
         })
 
       assert {:ok, conversation} =

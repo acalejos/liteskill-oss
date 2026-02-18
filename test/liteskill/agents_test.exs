@@ -90,6 +90,57 @@ defmodule Liteskill.AgentsTest do
       assert agent.llm_model == nil
       assert agent.agent_tools == []
     end
+
+    test "accepts llm_model_id the user has access to", %{owner: owner} do
+      {:ok, provider} =
+        Liteskill.LlmProviders.create_provider(%{
+          name: "Test Provider #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "test-key",
+          provider_config: %{"region" => "us-east-1"},
+          user_id: owner.id
+        })
+
+      {:ok, model} =
+        Liteskill.LlmModels.create_model(%{
+          name: "Test Model #{System.unique_integer([:positive])}",
+          model_id: "us.anthropic.claude-3-5-sonnet",
+          provider_id: provider.id,
+          user_id: owner.id,
+          instance_wide: true
+        })
+
+      attrs = agent_attrs(owner, %{llm_model_id: model.id})
+      assert {:ok, agent} = Agents.create_agent(attrs)
+      assert agent.llm_model_id == model.id
+    end
+
+    test "accepts empty string llm_model_id", %{owner: owner} do
+      attrs = agent_attrs(owner, %{llm_model_id: ""})
+      assert {:ok, _agent} = Agents.create_agent(attrs)
+    end
+
+    test "rejects llm_model_id the user cannot access", %{owner: owner, other: other} do
+      {:ok, provider} =
+        Liteskill.LlmProviders.create_provider(%{
+          name: "Private Provider #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "test-key",
+          provider_config: %{"region" => "us-east-1"},
+          user_id: owner.id
+        })
+
+      {:ok, model} =
+        Liteskill.LlmModels.create_model(%{
+          name: "Private Model #{System.unique_integer([:positive])}",
+          model_id: "us.anthropic.claude-3-5-sonnet",
+          provider_id: provider.id,
+          user_id: owner.id
+        })
+
+      attrs = agent_attrs(other, %{llm_model_id: model.id})
+      assert {:error, :invalid_model} = Agents.create_agent(attrs)
+    end
   end
 
   describe "update_agent/3" do
@@ -120,6 +171,36 @@ defmodule Liteskill.AgentsTest do
 
       assert {:error, %Ecto.Changeset{}} =
                Agents.update_agent(agent.id, owner.id, %{strategy: "invalid"})
+    end
+
+    test "rejects llm_model_id the user cannot access", %{owner: owner, other: other} do
+      {:ok, agent} = Agents.create_agent(agent_attrs(owner))
+
+      {:ok, provider} =
+        Liteskill.LlmProviders.create_provider(%{
+          name: "Other Provider #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "test-key",
+          provider_config: %{"region" => "us-east-1"},
+          user_id: other.id
+        })
+
+      {:ok, model} =
+        Liteskill.LlmModels.create_model(%{
+          name: "Other Model #{System.unique_integer([:positive])}",
+          model_id: "us.anthropic.claude-3-5-sonnet",
+          provider_id: provider.id,
+          user_id: other.id
+        })
+
+      assert {:error, :invalid_model} =
+               Agents.update_agent(agent.id, owner.id, %{llm_model_id: model.id})
+    end
+
+    test "allows update without llm_model_id", %{owner: owner} do
+      {:ok, agent} = Agents.create_agent(agent_attrs(owner))
+      assert {:ok, updated} = Agents.update_agent(agent.id, owner.id, %{name: "No Model Change"})
+      assert updated.name == "No Model Change"
     end
   end
 

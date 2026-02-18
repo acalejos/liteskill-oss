@@ -23,6 +23,8 @@ defmodule Liteskill.LlmModels.LlmModel do
     field :status, :string, default: "active"
     field :input_cost_per_million, :decimal
     field :output_cost_per_million, :decimal
+    field :context_window, :integer
+    field :max_output_tokens, :integer
 
     belongs_to :provider, Liteskill.LlmProviders.LlmProvider
     belongs_to :user, Liteskill.Accounts.User
@@ -43,12 +45,16 @@ defmodule Liteskill.LlmModels.LlmModel do
       :status,
       :input_cost_per_million,
       :output_cost_per_million,
+      :context_window,
+      :max_output_tokens,
       :provider_id,
       :user_id
     ])
     |> validate_required([:name, :model_id, :provider_id, :user_id])
     |> validate_inclusion(:model_type, @valid_model_types)
     |> validate_inclusion(:status, ["active", "inactive"])
+    |> validate_number(:context_window, greater_than: 0)
+    |> validate_number(:max_output_tokens, greater_than: 0)
     |> foreign_key_constraint(:user_id)
     |> foreign_key_constraint(:provider_id)
     |> unique_constraint([:provider_id, :model_id])

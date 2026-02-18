@@ -426,6 +426,60 @@ defmodule Liteskill.LLM.StreamHandlerTest do
     assert "AssistantStreamCompleted" in event_types
   end
 
+  test "retries on GenServer call timeout tuple then succeeds", %{conversation: conv} do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    retry_fn = fn _model, _msgs, on_chunk, _opts ->
+      count = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+      if count < 1 do
+        {:error, {:timeout, {GenServer, :call, [self(), {:next, 30_000}, 31_000]}}}
+      else
+        on_chunk.("ok")
+        {:ok, "ok", []}
+      end
+    end
+
+    stream_id = conv.stream_id
+
+    assert :ok =
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               model_id: "test-model",
+               stream_fn: retry_fn,
+               backoff_ms: 1
+             )
+
+    Agent.stop(counter)
+
+    events = Store.read_stream_forward(stream_id)
+    event_types = Enum.map(events, & &1.event_type)
+    assert "AssistantStreamCompleted" in event_types
+  end
+
+  test "fails immediately on RuntimeError (Finch pool exhaustion) without retrying",
+       %{conversation: conv} do
+    stream_id = conv.stream_id
+
+    fail_fn = fn _model, _msgs, _on_chunk, _opts ->
+      {:error,
+       %RuntimeError{
+         message: "Finch was unable to provide a connection within the timeout"
+       }}
+    end
+
+    assert {:error, _} =
+             StreamHandler.handle_stream(stream_id, [%{role: :user, content: "test"}],
+               model_id: "test-model",
+               stream_fn: fail_fn
+             )
+
+    events = Store.read_stream_forward(stream_id)
+    failed = Enum.find(events, &(&1.event_type == "AssistantStreamFailed"))
+    assert failed
+    assert failed.data["retry_count"] == 0
+    assert failed.data["error_message"] =~ "Finch was unable to provide a connection"
+  end
+
   test "passes tools as ReqLLM.Tool structs in call_opts", %{conversation: conv} do
     stream_id = conv.stream_id
 
@@ -857,6 +911,28 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       assert StreamHandler.extract_error_message(:timeout) == "timeout"
     end
 
+    test "handles GenServer call timeout tuples" do
+      error = {:timeout, {GenServer, :call, [self(), {:next, 30_000}, 31_000]}}
+      assert StreamHandler.extract_error_message(error) == "request timeout"
+    end
+
+    test "handles RuntimeError from Finch connection pool exhaustion" do
+      error = %RuntimeError{
+        message:
+          "Finch was unable to provide a connection within the timeout due to excess queuing for connections."
+      }
+
+      assert StreamHandler.extract_error_message(error) =~
+               "Finch was unable to provide a connection"
+    end
+
+    test "truncates long RuntimeError messages" do
+      error = %RuntimeError{message: String.duplicate("x", 600)}
+      result = StreamHandler.extract_error_message(error)
+      assert String.ends_with?(result, "...")
+      assert byte_size(result) <= 504
+    end
+
     test "falls back for unknown types" do
       assert StreamHandler.extract_error_message({:weird, :tuple}) == "LLM request failed"
     end
@@ -924,11 +1000,29 @@ defmodule Liteskill.LLM.StreamHandlerTest do
       assert StreamHandler.retryable_error?(:econnrefused)
     end
 
+    test "returns true for additional server error codes" do
+      assert StreamHandler.retryable_error?(%{status: 500})
+      assert StreamHandler.retryable_error?(%{status: 502})
+      assert StreamHandler.retryable_error?(%{status: 504})
+    end
+
+    test "returns true for GenServer call timeout tuples" do
+      assert StreamHandler.retryable_error?(
+               {:timeout, {GenServer, :call, [self(), {:next, 30_000}, 31_000]}}
+             )
+
+      assert StreamHandler.retryable_error?({:timeout, :some_ref})
+    end
+
     test "returns false for non-retryable errors" do
       refute StreamHandler.retryable_error?(%{status: 400})
-      refute StreamHandler.retryable_error?(%{status: 500})
+      refute StreamHandler.retryable_error?(%{status: 403})
       refute StreamHandler.retryable_error?("some error")
       refute StreamHandler.retryable_error?({:weird, :tuple})
+
+      refute StreamHandler.retryable_error?(%RuntimeError{
+               message: "Finch was unable to provide a connection"
+             })
     end
   end
 
@@ -1460,7 +1554,7 @@ defmodule Liteskill.LLM.StreamHandlerTest do
         }
       }
 
-      assert :cost_limit_exceeded =
+      assert {:error, :cost_limit_exceeded} =
                StreamHandler.handle_stream(
                  conv.stream_id,
                  [%{role: :user, content: "test"}],

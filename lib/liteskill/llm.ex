@@ -7,6 +7,7 @@ defmodule Liteskill.LLM do
       Liteskill.EventStore,
       Liteskill.Usage,
       Liteskill.LlmModels,
+      Liteskill.LlmGateway,
       Liteskill.McpServers
     ],
     exports: [StreamHandler, ToolUtils, RagContext]

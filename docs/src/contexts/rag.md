@@ -134,12 +134,12 @@ Options:
 - `:plug` -- Req test plug for CohereClient
 - `:dimensions` -- embedding dimensions (defaults to collection's `embedding_dimensions`)
 
-### `list_chunks_for_document(rag_document_id)`
+### `list_chunks_for_document(rag_document_id, user_id)`
 
-Lists all chunks for a RAG document ordered by position.
+Lists all chunks for a RAG document ordered by position. Returns `[]` if the user does not own the document and lacks wiki space ACL access.
 
 ```elixir
-list_chunks_for_document(binary_id) :: [Chunk.t()]
+list_chunks_for_document(binary_id, binary_id) :: [Chunk.t()]
 ```
 
 ### `delete_document_chunks(document_id)`

@@ -90,13 +90,37 @@ defmodule Liteskill.McpServers.Client do
     do_post(server, body, session_id, opts)
   end
 
-  defp send_request(server, body, session_id, opts) do
+  @mcp_max_retries 2
+  @mcp_default_backoff_ms 500
+
+  defp send_request(server, body, session_id, opts, attempt \\ 0) do
     case do_post(server, body, session_id, opts) do
       {:ok, %{status: 200, body: resp_body}} ->
         {:ok, resp_body}
 
+      {:ok, %{status: status, body: resp_body}} when status in [429, 500, 502, 503, 504] ->
+        if attempt < @mcp_max_retries do
+          backoff_ms = Keyword.get(opts, :mcp_backoff_ms, @mcp_default_backoff_ms)
+          jitter = :rand.uniform()
+          backoff = trunc(backoff_ms * Integer.pow(2, attempt) * (1 + jitter))
+          Process.sleep(backoff)
+          send_request(server, body, session_id, opts, attempt + 1)
+        else
+          {:error, %{status: status, body: resp_body}}
+        end
+
       {:ok, %{status: status, body: resp_body}} ->
         {:error, %{status: status, body: resp_body}}
+
+      # coveralls-ignore-start — Req.Test cannot simulate Mint.TransportError
+      {:error, %Mint.TransportError{} = _reason} when attempt < @mcp_max_retries ->
+        backoff_ms = Keyword.get(opts, :mcp_backoff_ms, @mcp_default_backoff_ms)
+        jitter = :rand.uniform()
+        backoff = trunc(backoff_ms * Integer.pow(2, attempt) * (1 + jitter))
+        Process.sleep(backoff)
+        send_request(server, body, session_id, opts, attempt + 1)
+
+      # coveralls-ignore-stop
 
       # coveralls-ignore-next-line
       {:error, reason} ->
@@ -114,7 +138,9 @@ defmodule Liteskill.McpServers.Client do
         headers: build_headers(server) ++ session_header(session_id)
       ] ++ req_opts
 
-    case Req.post(Req.new(receive_timeout: 30_000), all_opts) do
+    timeout = Keyword.get(opts, :receive_timeout, 60_000)
+
+    case Req.post(Req.new(receive_timeout: timeout), all_opts) do
       {:ok, resp} -> {:ok, %{resp | body: parse_body(resp.body)}}
       error -> error
     end

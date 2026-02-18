@@ -1,15 +1,22 @@
 defmodule LiteskillWeb.ProfileLive do
   @moduledoc """
   Profile components and event handlers, rendered within ChatLive's main area.
-  Handles user-facing settings: account info and password change.
+  Handles user-facing settings: account info, password change, and personal
+  LLM provider/model management.
   """
 
   use LiteskillWeb, :html
 
+  import LiteskillWeb.FormatHelpers
+
   alias Liteskill.Accounts
   alias Liteskill.Accounts.User
+  alias Liteskill.LlmModels
+  alias Liteskill.LlmProviders
+  alias Liteskill.LlmProviders.LlmProvider
+  alias LiteskillWeb.AdminLive
 
-  @profile_actions [:info, :password]
+  @profile_actions [:info, :password, :user_providers, :user_models]
 
   def profile_action?(action), do: action in @profile_actions
 
@@ -17,7 +24,13 @@ defmodule LiteskillWeb.ProfileLive do
     [
       password_form: to_form(%{"current" => "", "new" => "", "confirm" => ""}, as: :password),
       password_error: nil,
-      password_success: false
+      password_success: false,
+      user_llm_providers: [],
+      user_editing_provider: nil,
+      user_provider_form: nil,
+      user_llm_models: [],
+      user_editing_model: nil,
+      user_model_form: nil
     ]
   end
 
@@ -33,6 +46,27 @@ defmodule LiteskillWeb.ProfileLive do
     )
   end
 
+  defp load_tab_data(socket, :user_providers) do
+    user_id = socket.assigns.current_user.id
+
+    Phoenix.Component.assign(socket,
+      page_title: "My Providers",
+      user_llm_providers: LlmProviders.list_owned_providers(user_id),
+      user_editing_provider: nil
+    )
+  end
+
+  defp load_tab_data(socket, :user_models) do
+    user_id = socket.assigns.current_user.id
+
+    Phoenix.Component.assign(socket,
+      page_title: "My Models",
+      user_llm_providers: LlmProviders.list_owned_providers(user_id),
+      user_llm_models: LlmModels.list_owned_models(user_id),
+      user_editing_model: nil
+    )
+  end
+
   defp load_tab_data(socket, _action) do
     Phoenix.Component.assign(socket, page_title: "Profile")
   end
@@ -45,6 +79,12 @@ defmodule LiteskillWeb.ProfileLive do
   attr :password_form, :any, required: true
   attr :password_error, :string
   attr :password_success, :boolean
+  attr :user_llm_providers, :list
+  attr :user_editing_provider, :any
+  attr :user_provider_form, :any
+  attr :user_llm_models, :list
+  attr :user_editing_model, :any
+  attr :user_model_form, :any
 
   def profile(assigns) do
     ~H"""
@@ -65,6 +105,12 @@ defmodule LiteskillWeb.ProfileLive do
       <div class="flex gap-1 overflow-x-auto" role="tablist">
         <.tab_link label="Info" to={~p"/profile"} active={@live_action == :info} />
         <.tab_link label="Password" to={~p"/profile/password"} active={@live_action == :password} />
+        <.tab_link
+          label="Providers"
+          to={~p"/profile/providers"}
+          active={@live_action == :user_providers}
+        />
+        <.tab_link label="Models" to={~p"/profile/models"} active={@live_action == :user_models} />
       </div>
     </div>
 
@@ -194,6 +240,431 @@ defmodule LiteskillWeb.ProfileLive do
     """
   end
 
+  # --- Providers Tab ---
+
+  defp render_tab(%{live_action: :user_providers} = assigns) do
+    provider_types = LlmProvider.valid_provider_types()
+    assigns = assign(assigns, :provider_types, provider_types)
+
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="card-title">My Providers</h2>
+          <button
+            :if={!@user_editing_provider}
+            phx-click="user_new_provider"
+            class="btn btn-primary btn-sm"
+          >
+            Add Provider
+          </button>
+        </div>
+
+        <div :if={@user_editing_provider} class="mb-6 p-4 border border-base-300 rounded-lg">
+          <h3 class="font-semibold mb-3">
+            {if @user_editing_provider == :new, do: "Add New Provider", else: "Edit Provider"}
+          </h3>
+          <.form
+            for={@user_provider_form}
+            phx-submit={
+              if @user_editing_provider == :new,
+                do: "user_create_provider",
+                else: "user_update_provider"
+            }
+            class="space-y-3"
+          >
+            <input
+              :if={@user_editing_provider != :new}
+              type="hidden"
+              name="user_provider[id]"
+              value={@user_editing_provider}
+            />
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="form-control">
+                <label class="label"><span class="label-text">Name</span></label>
+                <input
+                  type="text"
+                  name="user_provider[name]"
+                  value={@user_provider_form[:name].value}
+                  class="input input-bordered input-sm w-full"
+                  required
+                  placeholder="My OpenAI"
+                />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Provider Type</span></label>
+                <select
+                  name="user_provider[provider_type]"
+                  class="select select-bordered select-sm w-full"
+                >
+                  <%= for pt <- @provider_types do %>
+                    <option
+                      value={pt}
+                      selected={@user_provider_form[:provider_type].value == pt}
+                    >
+                      {pt}
+                    </option>
+                  <% end %>
+                </select>
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">API Key</span></label>
+                <input
+                  type="password"
+                  name="user_provider[api_key]"
+                  value={@user_provider_form[:api_key].value}
+                  class="input input-bordered input-sm w-full"
+                  placeholder="Optional — encrypted at rest"
+                />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Status</span></label>
+                <select
+                  name="user_provider[status]"
+                  class="select select-bordered select-sm w-full"
+                >
+                  <option
+                    value="active"
+                    selected={@user_provider_form[:status].value != "inactive"}
+                  >
+                    Active
+                  </option>
+                  <option
+                    value="inactive"
+                    selected={@user_provider_form[:status].value == "inactive"}
+                  >
+                    Inactive
+                  </option>
+                </select>
+              </div>
+            </div>
+            <div class="form-control">
+              <label class="label">
+                <span class="label-text">Provider Config (JSON)</span>
+              </label>
+              <textarea
+                name="user_provider[provider_config_json]"
+                class="textarea textarea-bordered textarea-sm w-full font-mono"
+                rows="2"
+                placeholder='{"region": "us-east-1"}'
+              >{@user_provider_form[:provider_config_json] && @user_provider_form[:provider_config_json].value}</textarea>
+            </div>
+            <div class="flex gap-2">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button
+                type="button"
+                phx-click="user_cancel_provider"
+                class="btn btn-ghost btn-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </.form>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <%= for provider <- @user_llm_providers do %>
+                <tr>
+                  <td class="font-medium">{provider.name}</td>
+                  <td>
+                    <span class="badge badge-sm badge-neutral">{provider.provider_type}</span>
+                  </td>
+                  <td>
+                    <span class={[
+                      "badge badge-sm",
+                      provider.status == "active" && "badge-success",
+                      provider.status == "inactive" && "badge-warning"
+                    ]}>
+                      {provider.status}
+                    </span>
+                  </td>
+                  <td class="flex gap-1">
+                    <button
+                      phx-click="user_edit_provider"
+                      phx-value-id={provider.id}
+                      class="btn btn-ghost btn-xs"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      phx-click="user_delete_provider"
+                      phx-value-id={provider.id}
+                      data-confirm="Delete this provider? Models using it will lose their provider."
+                      class="btn btn-ghost btn-xs text-error"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+          <p :if={@user_llm_providers == []} class="text-base-content/60 text-center py-4">
+            No providers yet. Add one to get started.
+          </p>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # --- Models Tab ---
+
+  defp render_tab(%{live_action: :user_models} = assigns) do
+    model_types = LlmModels.LlmModel.valid_model_types()
+    assigns = assign(assigns, :model_types, model_types)
+
+    ~H"""
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="card-title">My Models</h2>
+          <button
+            :if={!@user_editing_model && @user_llm_providers != []}
+            phx-click="user_new_model"
+            class="btn btn-primary btn-sm"
+          >
+            Add Model
+          </button>
+        </div>
+
+        <p
+          :if={@user_llm_providers == [] && !@user_editing_model}
+          class="text-base-content/60 text-center py-4"
+        >
+          You need at least one provider before adding models.
+          <.link navigate={~p"/profile/providers"} class="link link-primary">
+            Add a provider
+          </.link>
+        </p>
+
+        <div :if={@user_editing_model} class="mb-6 p-4 border border-base-300 rounded-lg">
+          <h3 class="font-semibold mb-3">
+            {if @user_editing_model == :new, do: "Add New Model", else: "Edit Model"}
+          </h3>
+          <.form
+            for={@user_model_form}
+            phx-submit={
+              if @user_editing_model == :new, do: "user_create_model", else: "user_update_model"
+            }
+            class="space-y-3"
+          >
+            <input
+              :if={@user_editing_model != :new}
+              type="hidden"
+              name="user_model[id]"
+              value={@user_editing_model}
+            />
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="form-control">
+                <label class="label"><span class="label-text">Display Name</span></label>
+                <input
+                  type="text"
+                  name="user_model[name]"
+                  value={@user_model_form[:name].value}
+                  class="input input-bordered input-sm w-full"
+                  required
+                  placeholder="My GPT-4o"
+                />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Provider</span></label>
+                <select
+                  name="user_model[provider_id]"
+                  class="select select-bordered select-sm w-full"
+                  required
+                >
+                  <%= for p <- @user_llm_providers do %>
+                    <option
+                      value={p.id}
+                      selected={@user_model_form[:provider_id].value == p.id}
+                    >
+                      {p.name} ({p.provider_type})
+                    </option>
+                  <% end %>
+                </select>
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Model ID</span></label>
+                <input
+                  type="text"
+                  name="user_model[model_id]"
+                  value={@user_model_form[:model_id].value}
+                  class="input input-bordered input-sm w-full"
+                  required
+                  placeholder="gpt-4o"
+                />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Model Type</span></label>
+                <select
+                  name="user_model[model_type]"
+                  class="select select-bordered select-sm w-full"
+                >
+                  <%= for mt <- @model_types do %>
+                    <option
+                      value={mt}
+                      selected={@user_model_form[:model_type].value == mt}
+                    >
+                      {mt}
+                    </option>
+                  <% end %>
+                </select>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="form-control">
+                <label class="label">
+                  <span class="label-text">Input Cost / 1M tokens ($)</span>
+                </label>
+                <input
+                  type="number"
+                  name="user_model[input_cost_per_million]"
+                  value={
+                    @user_model_form[:input_cost_per_million] &&
+                      @user_model_form[:input_cost_per_million].value
+                  }
+                  class="input input-bordered input-sm w-full"
+                  step="0.01"
+                  min="0"
+                  placeholder="3.00"
+                />
+              </div>
+              <div class="form-control">
+                <label class="label">
+                  <span class="label-text">Output Cost / 1M tokens ($)</span>
+                </label>
+                <input
+                  type="number"
+                  name="user_model[output_cost_per_million]"
+                  value={
+                    @user_model_form[:output_cost_per_million] &&
+                      @user_model_form[:output_cost_per_million].value
+                  }
+                  class="input input-bordered input-sm w-full"
+                  step="0.01"
+                  min="0"
+                  placeholder="15.00"
+                />
+              </div>
+            </div>
+            <div class="form-control">
+              <label class="label">
+                <span class="label-text">Model Config (JSON)</span>
+              </label>
+              <textarea
+                name="user_model[model_config_json]"
+                class="textarea textarea-bordered textarea-sm w-full font-mono"
+                rows="2"
+                placeholder='{"max_tokens": 4096}'
+              >{@user_model_form[:model_config_json] && @user_model_form[:model_config_json].value}</textarea>
+            </div>
+            <div class="flex items-center gap-4">
+              <select
+                name="user_model[status]"
+                class="select select-bordered select-sm"
+              >
+                <option value="active" selected={@user_model_form[:status].value != "inactive"}>
+                  Active
+                </option>
+                <option value="inactive" selected={@user_model_form[:status].value == "inactive"}>
+                  Inactive
+                </option>
+              </select>
+            </div>
+            <div class="flex gap-2">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button type="button" phx-click="user_cancel_model" class="btn btn-ghost btn-sm">
+                Cancel
+              </button>
+            </div>
+          </.form>
+        </div>
+
+        <div :if={@user_llm_providers != []} class="overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Provider</th>
+                <th>Model ID</th>
+                <th>Type</th>
+                <th>Pricing (per 1M)</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <%= for model <- @user_llm_models do %>
+                <tr>
+                  <td class="font-medium">{model.name}</td>
+                  <td>
+                    <span class="badge badge-sm badge-neutral">
+                      {model.provider && model.provider.name}
+                    </span>
+                  </td>
+                  <td class="font-mono text-sm max-w-xs truncate">{model.model_id}</td>
+                  <td><span class="badge badge-sm badge-ghost">{model.model_type}</span></td>
+                  <td class="text-sm">
+                    <%= if model.input_cost_per_million || model.output_cost_per_million do %>
+                      <span class="text-base-content/60">In:</span>
+                      ${format_decimal(model.input_cost_per_million)}
+                      <span class="text-base-content/40 mx-1">/</span>
+                      <span class="text-base-content/60">Out:</span>
+                      ${format_decimal(model.output_cost_per_million)}
+                    <% else %>
+                      <span class="text-base-content/40">—</span>
+                    <% end %>
+                  </td>
+                  <td>
+                    <span class={[
+                      "badge badge-sm",
+                      model.status == "active" && "badge-success",
+                      model.status == "inactive" && "badge-warning"
+                    ]}>
+                      {model.status}
+                    </span>
+                  </td>
+                  <td class="flex gap-1">
+                    <button
+                      phx-click="user_edit_model"
+                      phx-value-id={model.id}
+                      class="btn btn-ghost btn-xs"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      phx-click="user_delete_model"
+                      phx-value-id={model.id}
+                      data-confirm="Delete this model?"
+                      class="btn btn-ghost btn-xs text-error"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+          <p :if={@user_llm_models == []} class="text-base-content/60 text-center py-4">
+            No models yet. Add one to get started.
+          </p>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   # --- Helpers ---
 
   defp info_row(assigns) do
@@ -286,6 +757,230 @@ defmodule LiteskillWeb.ProfileLive do
 
       {:error, _} ->
         {:noreply, socket}
+    end
+  end
+
+  # --- User Provider Event Handlers ---
+
+  def handle_event("user_new_provider", _params, socket) do
+    {:noreply,
+     Phoenix.Component.assign(socket,
+       user_editing_provider: :new,
+       user_provider_form: to_form(%{}, as: :user_provider)
+     )}
+  end
+
+  def handle_event("user_cancel_provider", _params, socket) do
+    {:noreply, Phoenix.Component.assign(socket, user_editing_provider: nil)}
+  end
+
+  def handle_event("user_create_provider", %{"user_provider" => params}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    with {:ok, attrs} <- AdminLive.build_provider_attrs(params, user_id),
+         attrs = Map.put(attrs, :instance_wide, false),
+         {:ok, _provider} <- LlmProviders.create_provider(attrs) do
+      {:noreply,
+       socket
+       |> Phoenix.Component.assign(
+         user_llm_providers: LlmProviders.list_owned_providers(user_id),
+         user_editing_provider: nil
+       )
+       |> Phoenix.LiveView.put_flash(:info, "Provider created")}
+    else
+      {:error, msg} when is_binary(msg) ->
+        {:noreply, Phoenix.LiveView.put_flash(socket, :error, msg)}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("create provider", reason))}
+    end
+  end
+
+  def handle_event("user_edit_provider", %{"id" => id}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    case LlmProviders.get_provider_for_owner(id, user_id) do
+      {:ok, provider} ->
+        config_json =
+          if provider.provider_config && provider.provider_config != %{},
+            do: Jason.encode!(provider.provider_config),
+            else: ""
+
+        form_data = %{
+          "name" => provider.name,
+          "provider_type" => provider.provider_type,
+          "api_key" => "",
+          "provider_config_json" => config_json,
+          "status" => provider.status
+        }
+
+        {:noreply,
+         Phoenix.Component.assign(socket,
+           user_editing_provider: id,
+           user_provider_form: to_form(form_data, as: :user_provider)
+         )}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("load provider", reason))}
+    end
+  end
+
+  def handle_event("user_update_provider", %{"user_provider" => params}, socket) do
+    user_id = socket.assigns.current_user.id
+    id = params["id"]
+
+    with {:ok, attrs} <- AdminLive.build_provider_attrs(params, user_id),
+         attrs = Map.put(attrs, :instance_wide, false),
+         {:ok, _provider} <- LlmProviders.update_provider(id, user_id, attrs) do
+      {:noreply,
+       socket
+       |> Phoenix.Component.assign(
+         user_llm_providers: LlmProviders.list_owned_providers(user_id),
+         user_editing_provider: nil
+       )
+       |> Phoenix.LiveView.put_flash(:info, "Provider updated")}
+    else
+      {:error, msg} when is_binary(msg) ->
+        {:noreply, Phoenix.LiveView.put_flash(socket, :error, msg)}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("update provider", reason))}
+    end
+  end
+
+  def handle_event("user_delete_provider", %{"id" => id}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    case LlmProviders.delete_provider(id, user_id) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> Phoenix.Component.assign(
+           user_llm_providers: LlmProviders.list_owned_providers(user_id),
+           user_editing_provider: nil
+         )
+         |> Phoenix.LiveView.put_flash(:info, "Provider deleted")}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("delete provider", reason))}
+    end
+  end
+
+  # --- User Model Event Handlers ---
+
+  def handle_event("user_new_model", _params, socket) do
+    {:noreply,
+     Phoenix.Component.assign(socket,
+       user_editing_model: :new,
+       user_model_form: to_form(%{}, as: :user_model)
+     )}
+  end
+
+  def handle_event("user_cancel_model", _params, socket) do
+    {:noreply, Phoenix.Component.assign(socket, user_editing_model: nil)}
+  end
+
+  def handle_event("user_create_model", %{"user_model" => params}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    with {:ok, attrs} <- AdminLive.build_model_attrs(params, user_id),
+         attrs = Map.put(attrs, :instance_wide, false),
+         {:ok, _model} <- LlmModels.create_model(attrs) do
+      {:noreply,
+       socket
+       |> Phoenix.Component.assign(
+         user_llm_models: LlmModels.list_owned_models(user_id),
+         user_editing_model: nil
+       )
+       |> Phoenix.LiveView.put_flash(:info, "Model created")}
+    else
+      {:error, msg} when is_binary(msg) ->
+        {:noreply, Phoenix.LiveView.put_flash(socket, :error, msg)}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("create model", reason))}
+    end
+  end
+
+  def handle_event("user_edit_model", %{"id" => id}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    case LlmModels.get_model_for_owner(id, user_id) do
+      {:ok, model} ->
+        config_json =
+          if model.model_config && model.model_config != %{},
+            do: Jason.encode!(model.model_config),
+            else: ""
+
+        form_data = %{
+          "name" => model.name,
+          "provider_id" => model.provider_id,
+          "model_id" => model.model_id,
+          "model_type" => model.model_type,
+          "model_config_json" => config_json,
+          "input_cost_per_million" =>
+            model.input_cost_per_million && Decimal.to_string(model.input_cost_per_million),
+          "output_cost_per_million" =>
+            model.output_cost_per_million && Decimal.to_string(model.output_cost_per_million),
+          "status" => model.status
+        }
+
+        {:noreply,
+         Phoenix.Component.assign(socket,
+           user_editing_model: id,
+           user_model_form: to_form(form_data, as: :user_model)
+         )}
+
+      {:error, reason} ->
+        {:noreply, Phoenix.LiveView.put_flash(socket, :error, action_error("load model", reason))}
+    end
+  end
+
+  def handle_event("user_update_model", %{"user_model" => params}, socket) do
+    user_id = socket.assigns.current_user.id
+    id = params["id"]
+
+    with {:ok, attrs} <- AdminLive.build_model_attrs(params, user_id),
+         attrs = Map.put(attrs, :instance_wide, false),
+         {:ok, _model} <- LlmModels.update_model(id, user_id, attrs) do
+      {:noreply,
+       socket
+       |> Phoenix.Component.assign(
+         user_llm_models: LlmModels.list_owned_models(user_id),
+         user_editing_model: nil
+       )
+       |> Phoenix.LiveView.put_flash(:info, "Model updated")}
+    else
+      {:error, msg} when is_binary(msg) ->
+        {:noreply, Phoenix.LiveView.put_flash(socket, :error, msg)}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("update model", reason))}
+    end
+  end
+
+  def handle_event("user_delete_model", %{"id" => id}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    case LlmModels.delete_model(id, user_id) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> Phoenix.Component.assign(
+           user_llm_models: LlmModels.list_owned_models(user_id),
+           user_editing_model: nil
+         )
+         |> Phoenix.LiveView.put_flash(:info, "Model deleted")}
+
+      {:error, reason} ->
+        {:noreply,
+         Phoenix.LiveView.put_flash(socket, :error, action_error("delete model", reason))}
     end
   end
 end

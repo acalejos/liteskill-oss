@@ -169,7 +169,8 @@ defmodule LiteskillWeb.ChatLive do
     push_event(socket, "set-accent", %{color: color})
   end
 
-  defp apply_action(socket, action, _params) when action in [:info, :password] do
+  defp apply_action(socket, action, _params)
+       when action in [:info, :password, :user_providers, :user_models] do
     maybe_unsubscribe(socket)
 
     socket
@@ -346,7 +347,7 @@ defmodule LiteskillWeb.ChatLive do
          {:ok, doc} <- Liteskill.DataSources.get_document(doc_id, user_id) do
       {rag_doc, chunks} =
         case Liteskill.Rag.get_rag_document_for_source_doc(doc_id, user_id) do
-          {:ok, rd} -> {rd, Liteskill.Rag.list_chunks_for_document(rd.id)}
+          {:ok, rd} -> {rd, Liteskill.Rag.list_chunks_for_document(rd.id, user_id)}
           {:error, _} -> {nil, []}
         end
 
@@ -1087,6 +1088,12 @@ defmodule LiteskillWeb.ChatLive do
             password_form={@password_form}
             password_error={@password_error}
             password_success={@password_success}
+            user_llm_providers={@user_llm_providers}
+            user_editing_provider={@user_editing_provider}
+            user_provider_form={@user_provider_form}
+            user_llm_models={@user_llm_models}
+            user_editing_model={@user_editing_model}
+            user_model_form={@user_model_form}
           />
         <% end %>
         <%= if AdminLive.admin_action?(@live_action) do %>
@@ -2340,6 +2347,11 @@ defmodule LiteskillWeb.ChatLive do
 
   @impl true
   def handle_event("cancel_stream", _params, socket) do
+    # Kill the streaming task to stop token burn immediately
+    if pid = socket.assigns.stream_task_pid do
+      Process.exit(pid, :shutdown)
+    end
+
     {:noreply, recover_stuck_stream(socket)}
   end
 
@@ -2912,7 +2924,11 @@ defmodule LiteskillWeb.ChatLive do
 
   # --- Profile Event Delegation ---
 
-  @profile_events ~w(change_password set_accent_color)
+  @profile_events ~w(change_password set_accent_color
+    user_new_provider user_cancel_provider user_create_provider
+    user_edit_provider user_update_provider user_delete_provider
+    user_new_model user_cancel_model user_create_model
+    user_edit_model user_update_model user_delete_model)
 
   def handle_event(event, params, socket) when event in @profile_events do
     ProfileLive.handle_event(event, params, socket)
@@ -2978,16 +2994,27 @@ defmodule LiteskillWeb.ChatLive do
         # Reload conversation to check actual status — avoids race when
         # StreamHandler immediately starts a new round after completing
         {:ok, fresh_conv} = Chat.get_conversation(conversation.id, user_id)
-        still_streaming = fresh_conv.status == "streaming"
+
+        # The stream task runs the entire multi-round loop (including tool calls).
+        # Between rounds the DB status is "active", but the task is still working.
+        # Keep the typing indicator alive while the task process is running.
+        task_alive = task_alive?(socket.assigns.stream_task_pid)
+        still_streaming = fresh_conv.status == "streaming" || task_alive
+
+        # Preserve stream_content only when actually mid-stream (DB says "streaming").
+        # Between rounds (task alive, DB "active") clear it so the typing indicator shows
+        # and the already-committed text doesn't duplicate the DB messages.
+        db_streaming = fresh_conv.status == "streaming"
 
         {:noreply,
          assign(socket,
            streaming: still_streaming,
-           stream_content: if(still_streaming, do: socket.assigns.stream_content, else: ""),
+           stream_content: if(db_streaming, do: socket.assigns.stream_content, else: ""),
            messages: messages,
            conversations: conversations,
            conversation: fresh_conv,
-           pending_tool_calls: [],
+           pending_tool_calls:
+             if(task_alive && db_streaming, do: socket.assigns.pending_tool_calls, else: []),
            stream_task_pid: if(still_streaming, do: socket.assigns.stream_task_pid, else: nil)
          )}
     end
@@ -3124,8 +3151,7 @@ defmodule LiteskillWeb.ChatLive do
     end
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, reason}, socket)
-      when reason != :normal do
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
     if socket.assigns.streaming && pid == socket.assigns.stream_task_pid do
       {:noreply, recover_stuck_stream(socket)}
     else
@@ -3242,7 +3268,14 @@ defmodule LiteskillWeb.ChatLive do
          %{event_type: "AssistantStreamStarted"},
          socket
        ) do
-    assign(socket, streaming: true, stream_content: "", stream_error: nil)
+    # Clear pending_tool_calls — previous round's tool calls are now in the DB
+    # and rendered inline on their parent message.
+    assign(socket,
+      streaming: true,
+      stream_content: "",
+      stream_error: nil,
+      pending_tool_calls: []
+    )
   end
 
   defp handle_event_store_event(
@@ -3812,6 +3845,9 @@ defmodule LiteskillWeb.ChatLive do
       assign(socket, streaming: false, stream_content: "", stream_task_pid: nil)
     end
   end
+
+  defp task_alive?(nil), do: false
+  defp task_alive?(pid), do: Process.alive?(pid)
 
   defp find_source_by_doc_id(messages, doc_id) do
     msg =

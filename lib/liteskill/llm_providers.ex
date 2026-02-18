@@ -1,7 +1,7 @@
 defmodule Liteskill.LlmProviders do
   use Boundary,
     top_level?: true,
-    deps: [Liteskill.Accounts, Liteskill.Authorization],
+    deps: [Liteskill.Accounts, Liteskill.Authorization, Liteskill.Rbac],
     exports: [LlmProvider]
 
   @moduledoc """
@@ -17,21 +17,18 @@ defmodule Liteskill.LlmProviders do
 
   import Ecto.Query
 
-  # --- Admin CRUD ---
+  # --- CRUD ---
 
   def create_provider(attrs) do
-    Repo.transaction(fn ->
-      case %LlmProvider{}
-           |> LlmProvider.changeset(attrs)
-           |> Repo.insert() do
-        {:ok, provider} ->
-          {:ok, _} = Authorization.create_owner_acl("llm_provider", provider.id, provider.user_id)
-          provider
+    case %LlmProvider{}
+         |> LlmProvider.changeset(attrs)
+         |> Repo.insert() do
+      {:ok, provider} ->
+        {:ok, provider}
 
-        {:error, changeset} ->
-          Repo.rollback(changeset)
-      end
-    end)
+      {:error, changeset} ->
+        {:error, changeset}
+    end
   end
 
   def update_provider(id, user_id, attrs) do
@@ -40,7 +37,7 @@ defmodule Liteskill.LlmProviders do
         {:error, :not_found}
 
       provider ->
-        with {:ok, provider} <- authorize_owner(provider, user_id) do
+        with :ok <- authorize_admin_or_owner(provider, user_id) do
           provider
           |> LlmProvider.changeset(attrs)
           |> Repo.update()
@@ -54,7 +51,7 @@ defmodule Liteskill.LlmProviders do
         {:error, :not_found}
 
       provider ->
-        with {:ok, provider} <- authorize_owner(provider, user_id) do
+        with :ok <- authorize_admin_or_owner(provider, user_id) do
           Repo.delete(provider)
         end
     end
@@ -63,12 +60,12 @@ defmodule Liteskill.LlmProviders do
   # --- User-facing queries ---
 
   def list_providers(user_id) do
-    accessible_ids = Authorization.accessible_entity_ids("llm_provider", user_id)
+    accessible_ids = Authorization.usage_accessible_entity_ids("llm_provider", user_id)
 
     LlmProvider
     |> where(
       [p],
-      p.user_id == ^user_id or p.instance_wide == true or p.id in subquery(accessible_ids)
+      p.instance_wide == true or p.user_id == ^user_id or p.id in subquery(accessible_ids)
     )
     |> order_by([p], asc: p.name)
     |> Repo.all()
@@ -79,14 +76,14 @@ defmodule Liteskill.LlmProviders do
       nil ->
         {:error, :not_found}
 
-      %LlmProvider{user_id: ^user_id} = provider ->
-        {:ok, provider}
-
       %LlmProvider{instance_wide: true} = provider ->
         {:ok, provider}
 
+      %LlmProvider{user_id: ^user_id} = provider ->
+        {:ok, provider}
+
       %LlmProvider{} = provider ->
-        if Authorization.has_access?("llm_provider", provider.id, user_id) do
+        if Authorization.has_usage_access?("llm_provider", provider.id, user_id) do
           {:ok, provider}
         else
           {:error, :not_found}
@@ -94,8 +91,61 @@ defmodule Liteskill.LlmProviders do
     end
   end
 
+  @doc "Returns only providers owned by the given user."
+  def list_owned_providers(user_id) do
+    LlmProvider
+    |> where([p], p.user_id == ^user_id)
+    |> order_by([p], asc: p.name)
+    |> Repo.all()
+  end
+
+  @doc "Returns a provider only if the user owns it."
+  def get_provider_for_owner(id, user_id) do
+    case Repo.get(LlmProvider, id) do
+      nil -> {:error, :not_found}
+      %LlmProvider{user_id: ^user_id} = provider -> {:ok, provider}
+      %LlmProvider{} -> {:error, :forbidden}
+    end
+  end
+
   def get_provider!(id) do
     Repo.get!(LlmProvider, id)
+  end
+
+  @doc """
+  Grants usage access (viewer role) on a provider to a user.
+  Requires the caller to have `llm_providers:manage` RBAC permission.
+  """
+  def grant_usage(provider_id, grantee_user_id, admin_user_id) do
+    with :ok <- authorize_admin(admin_user_id) do
+      Authorization.EntityAcl.changeset(%Authorization.EntityAcl{}, %{
+        entity_type: "llm_provider",
+        entity_id: provider_id,
+        user_id: grantee_user_id,
+        role: "viewer"
+      })
+      |> Repo.insert()
+    end
+  end
+
+  @doc """
+  Revokes usage access on a provider from a user.
+  Requires the caller to have `llm_providers:manage` RBAC permission.
+  """
+  def revoke_usage(provider_id, target_user_id, admin_user_id) do
+    with :ok <- authorize_admin(admin_user_id) do
+      case Repo.one(
+             from(a in Authorization.EntityAcl,
+               where:
+                 a.entity_type == "llm_provider" and
+                   a.entity_id == ^provider_id and
+                   a.user_id == ^target_user_id
+             )
+           ) do
+        nil -> {:error, :not_found}
+        acl -> Repo.delete(acl)
+      end
+    end
   end
 
   # --- Environment bootstrap ---
@@ -174,7 +224,29 @@ defmodule Liteskill.LlmProviders do
     end
   end
 
+  # --- Admin helpers ---
+
+  @doc "Returns all providers. No auth filtering — for admin UI only."
+  def list_all_providers do
+    LlmProvider
+    |> order_by([p], asc: p.name)
+    |> Repo.all()
+  end
+
+  @doc "Returns a single provider. No auth — for admin edit forms."
+  def get_provider_for_admin(id) do
+    case Repo.get(LlmProvider, id) do
+      nil -> {:error, :not_found}
+      provider -> {:ok, provider}
+    end
+  end
+
   # --- Private ---
 
-  defp authorize_owner(entity, user_id), do: Authorization.authorize_owner(entity, user_id)
+  defp authorize_admin(user_id), do: Liteskill.Rbac.authorize(user_id, "llm_providers:manage")
+
+  defp authorize_admin_or_owner(%LlmProvider{user_id: uid}, uid), do: :ok
+
+  defp authorize_admin_or_owner(%LlmProvider{}, user_id),
+    do: authorize_admin(user_id)
 end

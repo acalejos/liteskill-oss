@@ -225,6 +225,25 @@ defmodule Liteskill.Authorization do
     |> Repo.all()
   end
 
+  @doc """
+  Returns true if the user has non-owner access to the entity.
+  Excludes "owner" role — only direct ACL (viewer/editor/manager) or group-based ACL.
+  Used for usage/inference checks where ownership alone shouldn't grant access.
+  """
+  def has_usage_access?(entity_type, entity_id, user_id) do
+    Repo.exists?(
+      from(a in EntityAcl,
+        left_join: gm in GroupMembership,
+        on: gm.group_id == a.group_id and gm.user_id == ^user_id,
+        where:
+          a.entity_type == ^entity_type and
+            a.entity_id == ^entity_id and
+            a.role != "owner" and
+            (a.user_id == ^user_id or not is_nil(gm.id))
+      )
+    )
+  end
+
   # --- Query Helpers ---
 
   @doc """
@@ -243,6 +262,28 @@ defmodule Liteskill.Authorization do
         join: gm in GroupMembership,
         on: gm.group_id == a.group_id and gm.user_id == ^user_id,
         where: a.entity_type == ^entity_type and not is_nil(a.group_id),
+        select: a.entity_id
+      )
+
+    from(e in subquery(union_all(direct, ^group)), select: e.entity_id)
+  end
+
+  @doc """
+  Like `accessible_entity_ids/2` but excludes "owner" role from direct ACLs.
+  Used for usage/inference filtering where ownership alone shouldn't grant access.
+  """
+  def usage_accessible_entity_ids(entity_type, user_id) do
+    direct =
+      from(a in EntityAcl,
+        where: a.entity_type == ^entity_type and a.user_id == ^user_id and a.role != "owner",
+        select: a.entity_id
+      )
+
+    group =
+      from(a in EntityAcl,
+        join: gm in GroupMembership,
+        on: gm.group_id == a.group_id and gm.user_id == ^user_id,
+        where: a.entity_type == ^entity_type and not is_nil(a.group_id) and a.role != "owner",
         select: a.entity_id
       )
 

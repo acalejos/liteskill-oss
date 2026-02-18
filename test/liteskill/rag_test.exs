@@ -1701,8 +1701,8 @@ defmodule Liteskill.RagTest do
     end
   end
 
-  describe "list_chunks_for_document/1" do
-    test "returns chunks ordered by position", %{owner: owner} do
+  describe "list_chunks_for_document/2" do
+    test "returns chunks ordered by position for owner", %{owner: owner} do
       {:ok, coll} = create_collection(owner.id)
       {:ok, source} = create_source(coll.id, owner.id)
       {:ok, doc} = create_document(source.id, owner.id, %{title: "Chunked"})
@@ -1719,7 +1719,7 @@ defmodule Liteskill.RagTest do
         |> Liteskill.Repo.insert!()
       end
 
-      chunks = Rag.list_chunks_for_document(doc.id)
+      chunks = Rag.list_chunks_for_document(doc.id, owner.id)
       assert length(chunks) == 3
       assert Enum.map(chunks, & &1.position) == [0, 1, 2]
       assert Enum.map(chunks, & &1.content_hash) == ["hash_0", "hash_1", "hash_2"]
@@ -1730,7 +1730,25 @@ defmodule Liteskill.RagTest do
       {:ok, source} = create_source(coll.id, owner.id)
       {:ok, doc} = create_document(source.id, owner.id, %{title: "Empty"})
 
-      assert Rag.list_chunks_for_document(doc.id) == []
+      assert Rag.list_chunks_for_document(doc.id, owner.id) == []
+    end
+
+    test "returns empty list for unauthorized user", %{owner: owner, other: other} do
+      {:ok, coll} = create_collection(owner.id)
+      {:ok, source} = create_source(coll.id, owner.id)
+      {:ok, doc} = create_document(source.id, owner.id, %{title: "Secret"})
+
+      %Chunk{}
+      |> Chunk.changeset(%{
+        content: "Secret chunk",
+        position: 0,
+        document_id: doc.id,
+        token_count: 10,
+        content_hash: "hash_secret"
+      })
+      |> Liteskill.Repo.insert!()
+
+      assert Rag.list_chunks_for_document(doc.id, other.id) == []
     end
   end
 

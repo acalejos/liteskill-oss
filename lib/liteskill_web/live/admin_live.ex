@@ -149,10 +149,8 @@ defmodule LiteskillWeb.AdminLive do
   end
 
   defp load_tab_data(socket, :admin_providers) do
-    user_id = socket.assigns.current_user.id
-
     Phoenix.Component.assign(socket,
-      llm_providers: LlmProviders.list_providers(user_id),
+      llm_providers: LlmProviders.list_all_providers(),
       editing_llm_provider: nil,
       llm_provider_form: to_form(%{}, as: :llm_provider),
       page_title: "Provider Management"
@@ -160,11 +158,9 @@ defmodule LiteskillWeb.AdminLive do
   end
 
   defp load_tab_data(socket, :admin_models) do
-    user_id = socket.assigns.current_user.id
-
     Phoenix.Component.assign(socket,
-      llm_providers: LlmProviders.list_providers(user_id),
-      llm_models: LlmModels.list_models(user_id),
+      llm_providers: LlmProviders.list_all_providers(),
+      llm_models: LlmModels.list_all_models(),
       editing_llm_model: nil,
       llm_model_form: to_form(%{}, as: :llm_model),
       page_title: "Model Management"
@@ -184,9 +180,8 @@ defmodule LiteskillWeb.AdminLive do
   end
 
   defp load_tab_data(socket, :admin_rag) do
-    user_id = socket.assigns.current_user.id
     settings = Settings.get()
-    embedding_models = LlmModels.list_active_models(user_id, model_type: "embedding")
+    embedding_models = LlmModels.list_all_active_models(model_type: "embedding")
     stats = Liteskill.Rag.Pipeline.public_summary()
     reembed_in_progress = reembed_jobs_in_progress?()
 
@@ -2924,7 +2919,7 @@ defmodule LiteskillWeb.AdminLive do
         {:noreply,
          socket
          |> Phoenix.Component.assign(
-           llm_providers: LlmProviders.list_providers(socket.assigns.current_user.id),
+           llm_providers: LlmProviders.list_all_providers(),
            editing_llm_provider: nil
          )
          |> Phoenix.LiveView.put_flash(:info, "Provider created")}
@@ -2941,7 +2936,7 @@ defmodule LiteskillWeb.AdminLive do
 
   def handle_event("edit_llm_provider", %{"id" => id}, socket) do
     require_admin(socket, fn ->
-      case LlmProviders.get_provider(id, socket.assigns.current_user.id) do
+      case LlmProviders.get_provider_for_admin(id) do
         {:ok, provider} ->
           config_json =
             if provider.provider_config && provider.provider_config != %{},
@@ -2980,7 +2975,7 @@ defmodule LiteskillWeb.AdminLive do
         {:noreply,
          socket
          |> Phoenix.Component.assign(
-           llm_providers: LlmProviders.list_providers(socket.assigns.current_user.id),
+           llm_providers: LlmProviders.list_all_providers(),
            editing_llm_provider: nil
          )
          |> Phoenix.LiveView.put_flash(:info, "Provider updated")}
@@ -3002,7 +2997,7 @@ defmodule LiteskillWeb.AdminLive do
           {:noreply,
            socket
            |> Phoenix.Component.assign(
-             llm_providers: LlmProviders.list_providers(socket.assigns.current_user.id),
+             llm_providers: LlmProviders.list_all_providers(),
              editing_llm_provider: nil
            )
            |> Phoenix.LiveView.put_flash(:info, "Provider deleted")}
@@ -3043,7 +3038,7 @@ defmodule LiteskillWeb.AdminLive do
         {:noreply,
          socket
          |> Phoenix.Component.assign(
-           llm_models: LlmModels.list_models(socket.assigns.current_user.id),
+           llm_models: LlmModels.list_all_models(),
            editing_llm_model: nil
          )
          |> Phoenix.LiveView.put_flash(:info, "Model created")}
@@ -3060,7 +3055,7 @@ defmodule LiteskillWeb.AdminLive do
 
   def handle_event("edit_llm_model", %{"id" => id}, socket) do
     require_admin(socket, fn ->
-      case LlmModels.get_model(id, socket.assigns.current_user.id) do
+      case LlmModels.get_model_for_admin(id) do
         {:ok, model} ->
           config_json =
             if model.model_config && model.model_config != %{},
@@ -3101,7 +3096,7 @@ defmodule LiteskillWeb.AdminLive do
         {:noreply,
          socket
          |> Phoenix.Component.assign(
-           llm_models: LlmModels.list_models(socket.assigns.current_user.id),
+           llm_models: LlmModels.list_all_models(),
            editing_llm_model: nil
          )
          |> Phoenix.LiveView.put_flash(:info, "Model updated")}
@@ -3123,7 +3118,7 @@ defmodule LiteskillWeb.AdminLive do
           {:noreply,
            socket
            |> Phoenix.Component.assign(
-             llm_models: LlmModels.list_models(socket.assigns.current_user.id),
+             llm_models: LlmModels.list_all_models(),
              editing_llm_model: nil
            )
            |> Phoenix.LiveView.put_flash(:info, "Model deleted")}

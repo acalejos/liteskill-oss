@@ -16,14 +16,10 @@
   {"lib/liteskill/agents/actions/llm_generate.ex", :call},
   {"lib/liteskill/agents/actions/llm_generate.ex", :guard_fail},
   {"lib/liteskill/agents/actions/llm_generate.ex", :no_return},
-  {"lib/liteskill/agents/actions/llm_generate.ex", :pattern_match},
   {"lib/liteskill/agents/actions/llm_generate.ex", :unused_fun},
   {"lib/liteskill/llm/stream_handler.ex", :call},
   {"lib/liteskill/llm/stream_handler.ex", :guard_fail},
   {"lib/liteskill/llm/stream_handler.ex", :no_return},
-  # runner.ex pattern_match cascades from LlmGenerate return type
-  {"lib/liteskill/runs/runner.ex", :pattern_match},
-
   # -- 2. Compile-time env checks (Application.compile_env resolves at build time) --
   {"lib/liteskill/llm.ex", :pattern_match},
 

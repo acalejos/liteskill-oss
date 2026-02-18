@@ -6,6 +6,7 @@ defmodule Liteskill.Agents do
       Liteskill.Rbac,
       Liteskill.McpServers,
       Liteskill.LLM,
+      Liteskill.LlmGateway,
       Liteskill.Usage,
       Liteskill.LlmModels
     ],
@@ -29,7 +30,8 @@ defmodule Liteskill.Agents do
   def create_agent(attrs) do
     user_id = attrs[:user_id] || attrs["user_id"]
 
-    with :ok <- Liteskill.Rbac.authorize(user_id, "agents:create") do
+    with :ok <- Liteskill.Rbac.authorize(user_id, "agents:create"),
+         :ok <- validate_model_access(attrs[:llm_model_id] || attrs["llm_model_id"], user_id) do
       %AgentDefinition{}
       |> AgentDefinition.changeset(attrs)
       |> Authorization.create_with_owner_acl("agent_definition", [
@@ -45,7 +47,8 @@ defmodule Liteskill.Agents do
         {:error, :not_found}
 
       agent ->
-        with {:ok, agent} <- authorize_owner(agent, user_id) do
+        with {:ok, agent} <- authorize_owner(agent, user_id),
+             :ok <- validate_model_access(attrs[:llm_model_id] || attrs["llm_model_id"], user_id) do
           agent
           |> AgentDefinition.changeset(attrs)
           |> Repo.update()
@@ -162,4 +165,14 @@ defmodule Liteskill.Agents do
   # --- Private ---
 
   defp authorize_owner(entity, user_id), do: Authorization.authorize_owner(entity, user_id)
+
+  defp validate_model_access(nil, _user_id), do: :ok
+  defp validate_model_access("", _user_id), do: :ok
+
+  defp validate_model_access(model_id, user_id) do
+    case Liteskill.LlmModels.get_model(model_id, user_id) do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, :invalid_model}
+    end
+  end
 end

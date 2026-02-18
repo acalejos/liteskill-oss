@@ -124,7 +124,10 @@ defmodule Liteskill.McpServers.ClientTest do
       end)
 
       assert {:error, %{status: 500}} =
-               Client.list_tools(server, plug: {Req.Test, Liteskill.McpServers.Client})
+               Client.list_tools(server,
+                 plug: {Req.Test, Liteskill.McpServers.Client},
+                 mcp_backoff_ms: 1
+               )
     end
 
     test "returns empty list when server has no tools" do
@@ -578,6 +581,107 @@ defmodule Liteskill.McpServers.ClientTest do
 
       assert {:ok, []} =
                Client.list_tools(server, plug: {Req.Test, Liteskill.McpServers.Client})
+    end
+  end
+
+  describe "retry" do
+    test "retries 429 then succeeds on second attempt" do
+      server = build_server()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub_with_init(fn conn, _decoded ->
+        attempt = Agent.get_and_update(counter, fn n -> {n, n + 1} end)
+
+        if attempt == 0 do
+          conn |> Plug.Conn.send_resp(429, "Rate limited")
+        else
+          resp = %{"jsonrpc" => "2.0", "result" => %{"tools" => []}, "id" => 1}
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+        end
+      end)
+
+      assert {:ok, []} =
+               Client.list_tools(server,
+                 plug: {Req.Test, Liteskill.McpServers.Client},
+                 mcp_backoff_ms: 1
+               )
+
+      assert Agent.get(counter, & &1) == 2
+    end
+
+    test "retries 503 then succeeds on second attempt" do
+      server = build_server()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub_with_init(fn conn, _decoded ->
+        attempt = Agent.get_and_update(counter, fn n -> {n, n + 1} end)
+
+        if attempt == 0 do
+          conn |> Plug.Conn.send_resp(503, "Service Unavailable")
+        else
+          resp = %{
+            "jsonrpc" => "2.0",
+            "result" => %{
+              "content" => [%{"type" => "text", "text" => "ok"}]
+            },
+            "id" => 1
+          }
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+        end
+      end)
+
+      assert {:ok, _result} =
+               Client.call_tool(
+                 server,
+                 "some_tool",
+                 %{},
+                 plug: {Req.Test, Liteskill.McpServers.Client},
+                 mcp_backoff_ms: 1
+               )
+
+      assert Agent.get(counter, & &1) == 2
+    end
+
+    test "gives up after max retries on persistent 429" do
+      server = build_server()
+
+      stub_with_init(fn conn, _decoded ->
+        conn |> Plug.Conn.send_resp(429, "Rate limited")
+      end)
+
+      assert {:error, %{status: 429}} =
+               Client.list_tools(server,
+                 plug: {Req.Test, Liteskill.McpServers.Client},
+                 mcp_backoff_ms: 1
+               )
+    end
+
+    test "does not retry non-retryable HTTP errors like 400" do
+      server = build_server()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub_with_init(fn conn, _decoded ->
+        Agent.update(counter, &(&1 + 1))
+        conn |> Plug.Conn.send_resp(400, "Bad Request")
+      end)
+
+      assert {:error, %{status: 400}} =
+               Client.call_tool(
+                 server,
+                 "some_tool",
+                 %{},
+                 plug: {Req.Test, Liteskill.McpServers.Client},
+                 mcp_backoff_ms: 1
+               )
+
+      # Should only have been called once (no retries for 400)
+      assert Agent.get(counter, & &1) == 1
     end
   end
 end

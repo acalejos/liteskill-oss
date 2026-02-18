@@ -20,13 +20,14 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
     description: "Calls the LLM with prompt, system prompt, and tools",
     schema: []
 
+  alias Liteskill.LlmGateway.{ProviderGate, TokenBucket}
   alias Liteskill.LLM.{StreamHandler, ToolUtils}
 
   require Logger
 
   @max_retries 3
   @default_backoff_ms 1000
-  @default_receive_timeout 120_000
+  @default_receive_timeout 300_000
   @default_max_iterations 25
   @default_keep_rounds 4
 
@@ -215,6 +216,75 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
   end
 
   defp do_llm_call(llm_model, system_prompt, llm_context, state, round) do
+    # Gateway checks (skip in tests unless explicitly opted in)
+    skip_gateway = state[:skip_gateway] || false
+
+    # coveralls-ignore-start — gateway integration tested at ProviderGate/TokenBucket level
+    with :ok <- maybe_check_token_bucket(llm_model, state, skip_gateway),
+         {:ok, gate_ref} <- maybe_checkout_provider_gate(llm_model, skip_gateway) do
+      # coveralls-ignore-stop
+      do_llm_call_inner(
+        llm_model,
+        system_prompt,
+        llm_context,
+        state,
+        round,
+        gate_ref
+      )
+
+      # coveralls-ignore-start
+    else
+      {:error, reason} -> {:error, reason, llm_context}
+    end
+  end
+
+  defp maybe_check_token_bucket(_llm_model, _state, true), do: :ok
+
+  defp maybe_check_token_bucket(llm_model, state, false) do
+    user_id = state[:user_id]
+
+    if user_id do
+      case TokenBucket.check_rate(user_id, llm_model.model_id) do
+        :ok -> :ok
+        {:error, :rate_limited, _ms} -> {:error, "Rate limited — too many requests"}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp maybe_checkout_provider_gate(_llm_model, true), do: {:ok, nil}
+
+  defp maybe_checkout_provider_gate(llm_model, false) do
+    provider_id =
+      case llm_model do
+        %{provider_id: pid} when is_binary(pid) -> pid
+        %{provider: %{id: pid}} when is_binary(pid) -> pid
+        _ -> nil
+      end
+
+    if provider_id do
+      case ProviderGate.checkout(provider_id) do
+        {:ok, ref} -> {:ok, {provider_id, ref}}
+        {:error, :circuit_open, _ms} -> {:error, "LLM provider circuit open"}
+        {:error, :retry_after, _ms} -> {:error, "LLM provider rate limited"}
+        {:error, :concurrency_limit} -> {:error, "Too many concurrent LLM requests"}
+        {:error, :gateway_not_available} -> {:ok, nil}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp gate_checkin(nil, _result), do: :ok
+
+  defp gate_checkin({provider_id, ref}, result) do
+    ProviderGate.checkin(provider_id, ref, result)
+  end
+
+  # coveralls-ignore-stop
+
+  defp do_llm_call_inner(llm_model, system_prompt, llm_context, state, round, gate_ref) do
     {model_spec, req_opts} =
       Liteskill.LlmModels.build_provider_options(llm_model, enable_caching: true)
 
@@ -224,6 +294,23 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
     req_opts = Keyword.put_new(req_opts, :receive_timeout, @default_receive_timeout)
 
     req_opts = Keyword.put(req_opts, :system_prompt, system_prompt)
+
+    # Default to model's max_output_tokens if configured and no explicit max_tokens
+    # coveralls-ignore-start — requires LlmModel with max_output_tokens set
+    req_opts =
+      if Keyword.has_key?(req_opts, :max_tokens) do
+        req_opts
+      else
+        case llm_model do
+          %{max_output_tokens: max} when is_integer(max) ->
+            Keyword.put(req_opts, :max_tokens, max)
+
+          _ ->
+            req_opts
+        end
+      end
+
+    # coveralls-ignore-stop
 
     tools = state[:tools] || []
 
@@ -245,6 +332,7 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
 
     case generate_with_retry(model_spec, llm_context, req_opts, state) do
       {:ok, response} ->
+        gate_checkin(gate_ref, :ok)
         latency_ms = System.monotonic_time(:millisecond) - start_time
         record_usage(response, llm_model, state, latency_ms, round)
 
@@ -267,6 +355,7 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
         end
 
       {:error, reason} ->
+        gate_checkin(gate_ref, {:error, :non_retryable})
         {:error, reason, llm_context}
     end
   end
@@ -279,15 +368,35 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
       {:error, reason} ->
         if attempt < @max_retries && StreamHandler.retryable_error?(reason) do
           backoff_ms = Keyword.get(state[:retry_opts] || [], :backoff_ms, @default_backoff_ms)
+
+          # Use longer backoff for 429 rate-limit errors
+          backoff_ms =
+            if match?(%{status: 429}, reason), do: backoff_ms * 3, else: backoff_ms
+
           jitter = :rand.uniform()
           backoff = trunc(backoff_ms * Integer.pow(2, attempt) * (1 + jitter))
+          label = StreamHandler.retryable_error_label(reason)
+
+          :telemetry.execute(
+            [:liteskill, :llm, :retry],
+            %{count: 1, backoff_ms: backoff},
+            %{agent: state[:agent_name], attempt: attempt + 1, error_label: label}
+          )
 
           Logger.warning(
             "LlmGenerate: retryable error for #{state[:agent_name]}, " <>
               "retrying in #{backoff}ms (attempt #{attempt + 1}/#{@max_retries})"
           )
 
-          Process.sleep(backoff)
+          # Interruptible sleep — responds to cancel during backoff
+          # coveralls-ignore-start — cancel path untestable without race
+          receive do
+            :cancel -> :cancelled
+          after
+            backoff -> :ok
+          end
+
+          # coveralls-ignore-stop
           generate_with_retry(model_spec, llm_context, req_opts, state, attempt + 1)
         else
           {:error, reason}

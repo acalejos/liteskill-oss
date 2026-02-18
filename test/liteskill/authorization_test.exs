@@ -422,6 +422,94 @@ defmodule Liteskill.AuthorizationTest do
     end
   end
 
+  describe "has_usage_access?/3" do
+    test "returns false for owner-only ACL", %{user: user, entity_id: eid, entity_type: etype} do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      refute Authorization.has_usage_access?(etype, eid, user.id)
+    end
+
+    test "returns true for viewer ACL", %{
+      user: user,
+      other: other,
+      entity_id: eid,
+      entity_type: etype
+    } do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      {:ok, _} = Authorization.grant_access(etype, eid, user.id, other.id, "viewer")
+      assert Authorization.has_usage_access?(etype, eid, other.id)
+    end
+
+    test "returns true for manager ACL", %{
+      user: user,
+      other: other,
+      entity_id: eid,
+      entity_type: etype
+    } do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      {:ok, _} = Authorization.grant_access(etype, eid, user.id, other.id, "manager")
+      assert Authorization.has_usage_access?(etype, eid, other.id)
+    end
+
+    test "returns true for group-based non-owner ACL", %{
+      user: user,
+      other: other,
+      entity_id: eid,
+      entity_type: etype
+    } do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      {:ok, group} = Groups.create_group("Usage Group", user.id)
+      {:ok, _} = Groups.add_member(group.id, user.id, other.id)
+      {:ok, _} = Authorization.grant_group_access(etype, eid, user.id, group.id, "viewer")
+      assert Authorization.has_usage_access?(etype, eid, other.id)
+    end
+
+    test "returns false for no access", %{other: other, entity_id: eid, entity_type: etype} do
+      refute Authorization.has_usage_access?(etype, eid, other.id)
+    end
+  end
+
+  describe "usage_accessible_entity_ids/2" do
+    test "excludes owner-role entries", %{user: user, entity_type: etype} do
+      id1 = Ecto.UUID.generate()
+      {:ok, _} = Authorization.create_owner_acl(etype, id1, user.id)
+
+      query = Authorization.usage_accessible_entity_ids(etype, user.id)
+      ids = Repo.all(query)
+
+      refute id1 in ids
+    end
+
+    test "includes non-owner direct ACLs", %{
+      user: user,
+      other: other,
+      entity_type: etype
+    } do
+      entity_id = Ecto.UUID.generate()
+      {:ok, _} = Authorization.create_owner_acl(etype, entity_id, user.id)
+      {:ok, _} = Authorization.grant_access(etype, entity_id, user.id, other.id, "viewer")
+
+      query = Authorization.usage_accessible_entity_ids(etype, other.id)
+      ids = Repo.all(query)
+      assert entity_id in ids
+    end
+
+    test "includes group-based non-owner ACLs", %{
+      user: user,
+      other: other,
+      entity_type: etype
+    } do
+      entity_id = Ecto.UUID.generate()
+      {:ok, _} = Authorization.create_owner_acl(etype, entity_id, user.id)
+      {:ok, group} = Groups.create_group("Usage Query Group", user.id)
+      {:ok, _} = Groups.add_member(group.id, user.id, other.id)
+      {:ok, _} = Authorization.grant_group_access(etype, entity_id, user.id, group.id, "viewer")
+
+      query = Authorization.usage_accessible_entity_ids(etype, other.id)
+      ids = Repo.all(query)
+      assert entity_id in ids
+    end
+  end
+
   describe "can_edit?/3" do
     test "true for editor", %{user: user, other: other, entity_id: eid} do
       {:ok, _} = Authorization.create_owner_acl("wiki_space", eid, user.id)

@@ -9,6 +9,7 @@ defmodule Liteskill.Application do
   def start(_type, _args) do
     Liteskill.Crypto.validate_key!()
     LiteskillWeb.Plugs.RateLimiter.create_table()
+    Liteskill.LlmGateway.TokenBucket.create_table()
 
     children =
       [
@@ -36,6 +37,11 @@ defmodule Liteskill.Application do
         LiteskillWeb.Plugs.RateLimiter.Sweeper,
         # Task supervisor for LLM streaming and other async work
         {Task.Supervisor, name: Liteskill.TaskSupervisor},
+        # LLM Gateway: per-provider circuit breaker + concurrency gates
+        {Registry, keys: :unique, name: Liteskill.LlmGateway.GateRegistry},
+        {DynamicSupervisor, name: Liteskill.LlmGateway.GateSupervisor, strategy: :one_for_one},
+        # Periodic sweep of stale LLM token bucket ETS entries
+        Liteskill.LlmGateway.TokenBucket.Sweeper,
         # Chat projector - projects events to read-model tables
         Liteskill.Chat.Projector,
         # Periodic sweep for conversations stuck in streaming status

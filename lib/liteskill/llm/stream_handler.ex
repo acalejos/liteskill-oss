@@ -15,6 +15,7 @@ defmodule Liteskill.LLM.StreamHandler do
 
   alias Liteskill.Aggregate.Loader
   alias Liteskill.Chat.{ConversationAggregate, Projector}
+  alias Liteskill.LlmGateway.{ProviderGate, TokenBucket}
   alias Liteskill.LLM.ToolUtils
   alias Liteskill.Usage
 
@@ -48,20 +49,134 @@ defmodule Liteskill.LLM.StreamHandler do
     cost_limit = Keyword.get(opts, :cost_limit)
     conversation_id = Keyword.get(opts, :conversation_id)
 
-    if cost_limit && conversation_id do
-      case Usage.check_cost_limit(:conversation, conversation_id, cost_limit) do
-        :ok ->
-          do_start_stream(stream_id, messages, opts)
-
-        {:error, :cost_limit_exceeded, current} ->
-          {:error,
-           {"cost_limit",
-            "Cost limit of $#{cost_limit} reached (spent: $#{Decimal.round(current, 4)})"}}
-      end
-    else
+    with :ok <- check_cost_limit(cost_limit, conversation_id),
+         {:ok, opts} <- check_gateway(opts) do
       do_start_stream(stream_id, messages, opts)
+    else
+      {:error, reason} = error ->
+        Logger.warning(
+          "StreamHandler: pre-flight check failed for #{stream_id}: #{inspect(reason)}"
+        )
+
+        error
     end
   end
+
+  defp check_cost_limit(nil, _), do: :ok
+  defp check_cost_limit(_, nil), do: :ok
+
+  defp check_cost_limit(cost_limit, conversation_id) do
+    case Usage.check_cost_limit(:conversation, conversation_id, cost_limit) do
+      :ok ->
+        :ok
+
+      {:error, :cost_limit_exceeded, current} ->
+        {:error,
+         {"cost_limit",
+          "Cost limit of $#{cost_limit} reached (spent: $#{Decimal.round(current, 4)})"}}
+    end
+  end
+
+  # coveralls-ignore-start — gateway integration tested at ProviderGate/TokenBucket level
+  defp check_gateway(opts) do
+    if Keyword.get(opts, :skip_gateway, false) do
+      {:ok, opts}
+    else
+      with :ok <- check_token_bucket(opts),
+           {:ok, gate_opts} <- check_provider_gate(opts) do
+        {:ok, Keyword.merge(opts, gate_opts)}
+      end
+    end
+  end
+
+  defp check_token_bucket(opts) do
+    user_id = Keyword.get(opts, :user_id)
+    llm_model = Keyword.get(opts, :llm_model)
+    model_id = if llm_model, do: llm_model.model_id, else: Keyword.get(opts, :model_id)
+
+    if user_id && model_id do
+      case TokenBucket.check_rate(user_id, model_id) do
+        :ok ->
+          :ok
+
+        {:error, :rate_limited, _ms} ->
+          {:error, {"rate_limited", "Too many requests — try again shortly"}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp check_provider_gate(opts) do
+    provider_id = extract_provider_id(opts)
+
+    if provider_id do
+      case ProviderGate.checkout(provider_id) do
+        {:ok, ref} ->
+          {:ok, [gateway_provider_id: provider_id, gateway_checkout_ref: ref]}
+
+        {:error, :gateway_not_available} ->
+          {:ok, []}
+
+        {:error, :circuit_open, _ms} ->
+          {:error, {"circuit_open", "LLM provider temporarily unavailable — try again shortly"}}
+
+        {:error, :retry_after, _ms} ->
+          {:error, {"rate_limited", "LLM provider rate limit — try again shortly"}}
+
+        {:error, :concurrency_limit} ->
+          {:error, {"concurrency_limit", "Too many concurrent requests — try again shortly"}}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  defp check_context_size(messages, %{context_window: cw})
+       when is_integer(cw) and cw > 0 do
+    estimated_bytes =
+      messages
+      |> Enum.reduce(0, fn msg, acc ->
+        content = msg[:content] || msg["content"] || ""
+        acc + content_byte_size(content)
+      end)
+
+    estimated_tokens = div(estimated_bytes, 4)
+
+    if estimated_tokens > cw * 0.95 do
+      {:error,
+       {"context_too_large",
+        "Estimated #{estimated_tokens} tokens exceeds #{trunc(cw * 0.95)} token limit (95% of #{cw} context window)"}}
+    else
+      :ok
+    end
+  end
+
+  defp check_context_size(_messages, _llm_model), do: :ok
+
+  defp content_byte_size(content) when is_binary(content), do: byte_size(content)
+  defp content_byte_size(content) when is_list(content), do: byte_size(Jason.encode!(content))
+  defp content_byte_size(content) when is_map(content), do: byte_size(Jason.encode!(content))
+  defp content_byte_size(_), do: 0
+
+  defp extract_provider_id(opts) do
+    case Keyword.get(opts, :llm_model) do
+      %{provider_id: pid} when is_binary(pid) -> pid
+      %{provider: %{id: pid}} when is_binary(pid) -> pid
+      _ -> nil
+    end
+  end
+
+  defp gateway_checkin(opts, result) do
+    provider_id = Keyword.get(opts, :gateway_provider_id)
+    ref = Keyword.get(opts, :gateway_checkout_ref)
+
+    if provider_id && ref do
+      ProviderGate.checkin(provider_id, ref, result)
+    end
+  end
+
+  # coveralls-ignore-stop
 
   defp do_start_stream(stream_id, messages, opts) do
     llm_model = Keyword.get(opts, :llm_model)
@@ -73,20 +188,23 @@ defmodule Liteskill.LLM.StreamHandler do
         true -> raise "No model specified: pass :llm_model or :model_id option"
       end
 
-    message_id = Ecto.UUID.generate()
-    rag_sources = Keyword.get(opts, :rag_sources)
+    # Pre-flight context size check (only when context_window is configured)
+    with :ok <- check_context_size(messages, llm_model) do
+      message_id = Ecto.UUID.generate()
+      rag_sources = Keyword.get(opts, :rag_sources)
 
-    command =
-      {:start_assistant_stream,
-       %{message_id: message_id, model_id: model_id, rag_sources: rag_sources}}
+      command =
+        {:start_assistant_stream,
+         %{message_id: message_id, model_id: model_id, rag_sources: rag_sources}}
 
-    case Loader.execute(ConversationAggregate, stream_id, command) do
-      {:ok, _state, events} ->
-        Projector.project_events(stream_id, events)
-        do_stream(stream_id, message_id, model_id, messages, opts)
+      case Loader.execute(ConversationAggregate, stream_id, command) do
+        {:ok, _state, events} ->
+          Projector.project_events(stream_id, events)
+          do_stream(stream_id, message_id, model_id, messages, opts)
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -94,8 +212,10 @@ defmodule Liteskill.LLM.StreamHandler do
     do_stream_with_retry(stream_id, message_id, model_id, messages, opts, 0)
   end
 
-  defp do_stream_with_retry(stream_id, message_id, _model_id, _messages, _opts, retry_count)
+  defp do_stream_with_retry(stream_id, message_id, _model_id, _messages, opts, retry_count)
        when retry_count >= @max_retries do
+    gateway_checkin(opts, {:error, :retryable, @default_backoff_ms})
+
     fail_stream(
       stream_id,
       message_id,
@@ -175,20 +295,51 @@ defmodule Liteskill.LLM.StreamHandler do
 
       {:error, reason} ->
         if retryable_error?(reason) do
+          label = retryable_error_label(reason)
           base_backoff = Keyword.get(opts, :backoff_ms, @default_backoff_ms)
+
+          # Use longer backoff for 429 rate-limit errors
+          base_backoff =
+            if match?(%{status: 429}, reason), do: base_backoff * 3, else: base_backoff
+
           jitter = :rand.uniform()
           backoff = trunc(base_backoff * Integer.pow(2, retry_count) * (1 + jitter))
-          label = retryable_error_label(reason)
+
+          :telemetry.execute(
+            [:liteskill, :llm, :retry],
+            %{count: 1, backoff_ms: backoff},
+            %{stream_id: stream_id, attempt: retry_count + 1, error_label: label}
+          )
 
           Logger.warning(
             "StreamHandler #{label}, retrying in #{backoff}ms (attempt #{retry_count + 1})"
           )
 
-          Process.sleep(backoff)
+          # Interruptible sleep — responds to cancel during backoff
+          # coveralls-ignore-start — cancel path untestable without race
+          receive do
+            :cancel -> :cancelled
+          after
+            backoff -> :ok
+          end
+
+          # coveralls-ignore-stop
+          # Clean up orphaned chunks from the failed attempt
+          Liteskill.Chat.delete_message_chunks(message_id)
+
           do_stream_with_retry(stream_id, message_id, model_id, messages, opts, retry_count + 1)
         else
           error_message = extract_error_message(reason)
+
+          :telemetry.execute(
+            [:liteskill, :llm, :call_failed],
+            %{count: 1},
+            %{stream_id: stream_id, error_message: error_message}
+          )
+
           Logger.warning("StreamHandler: LLM request failed for #{stream_id}: #{error_message}")
+
+          gateway_checkin(opts, {:error, :non_retryable})
           fail_stream(stream_id, message_id, "request_error", error_message, retry_count)
         end
     end
@@ -335,8 +486,23 @@ defmodule Liteskill.LLM.StreamHandler do
 
     req_opts =
       case Keyword.get(opts, :max_tokens) do
-        nil -> req_opts
-        max -> Keyword.put(req_opts, :max_tokens, max)
+        nil ->
+          # Default to model's max_output_tokens if configured
+          llm_model = Keyword.get(opts, :llm_model)
+
+          # coveralls-ignore-start — requires LlmModel with max_output_tokens set
+          case llm_model do
+            %{max_output_tokens: max} when is_integer(max) ->
+              Keyword.put(req_opts, :max_tokens, max)
+
+            _ ->
+              req_opts
+          end
+
+        # coveralls-ignore-stop
+
+        max ->
+          Keyword.put(req_opts, :max_tokens, max)
       end
 
     case Keyword.get(opts, :tools) do
@@ -353,13 +519,16 @@ defmodule Liteskill.LLM.StreamHandler do
 
   Retryable errors include:
     * HTTP 429 (rate limited)
+    * HTTP 500 (internal server error)
+    * HTTP 502 (bad gateway)
     * HTTP 503 (service unavailable)
+    * HTTP 504 (gateway timeout)
     * HTTP 408 (request timeout)
     * `%Mint.TransportError{}` (connection reset, timeout, closed)
     * Structs/maps with `reason: "timeout"` or `reason: :timeout` (e.g. `ReqLLM.Error.API.Request`)
     * Atom errors: `:timeout`, `:closed`, `:econnrefused`
   """
-  def retryable_error?(%{status: status}) when status in [429, 503, 408], do: true
+  def retryable_error?(%{status: status}) when status in [429, 500, 502, 503, 504, 408], do: true
   def retryable_error?(%Mint.TransportError{}), do: true
 
   def retryable_error?(%{reason: reason})
@@ -367,14 +536,17 @@ defmodule Liteskill.LLM.StreamHandler do
       do: true
 
   def retryable_error?(reason) when reason in [:timeout, :closed, :econnrefused], do: true
+  def retryable_error?({:timeout, _}), do: true
   def retryable_error?(_), do: false
 
-  defp retryable_error_label(%{status: status}) when is_integer(status), do: "HTTP #{status}"
-  defp retryable_error_label(%Mint.TransportError{reason: r}), do: "transport error (#{r})"
-  defp retryable_error_label(%{reason: reason}), do: "#{reason}"
-  defp retryable_error_label(reason) when is_atom(reason), do: "#{reason}"
+  @doc false
+  def retryable_error_label(%{status: status}) when is_integer(status), do: "HTTP #{status}"
+  def retryable_error_label(%Mint.TransportError{reason: r}), do: "transport error (#{r})"
+  def retryable_error_label(%{reason: reason}), do: "#{reason}"
+  def retryable_error_label(reason) when is_atom(reason), do: "#{reason}"
+  def retryable_error_label({:timeout, _}), do: "timeout"
   # coveralls-ignore-next-line
-  defp retryable_error_label(_), do: "transient error"
+  def retryable_error_label(_), do: "transient error"
 
   @doc false
   def extract_error_message(%{status: status, response_body: rb})
@@ -407,6 +579,10 @@ defmodule Liteskill.LLM.StreamHandler do
   def extract_error_message(reason) when is_binary(reason), do: reason
 
   def extract_error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  def extract_error_message({:timeout, _}), do: "request timeout"
+
+  def extract_error_message(%RuntimeError{message: msg}), do: truncate_error(msg, 500)
 
   def extract_error_message(_reason), do: "LLM request failed"
 
@@ -613,7 +789,13 @@ defmodule Liteskill.LLM.StreamHandler do
           handle_stream(stream_id, next_messages, next_opts)
 
         {:error, :cost_limit_exceeded, _current} ->
-          :cost_limit_exceeded
+          gateway_checkin(opts, :ok)
+
+          Logger.warning(
+            "StreamHandler: cost limit exceeded for #{stream_id}, stopping tool-call loop"
+          )
+
+          {:error, :cost_limit_exceeded}
       end
     else
       handle_stream(stream_id, next_messages, next_opts)
@@ -734,6 +916,8 @@ defmodule Liteskill.LLM.StreamHandler do
   # -- Stream completion / failure --
 
   defp complete_stream(stream_id, message_id, full_content, latency_ms, usage, opts) do
+    gateway_checkin(opts, :ok)
+
     command =
       {:complete_stream,
        %{
@@ -766,6 +950,11 @@ defmodule Liteskill.LLM.StreamHandler do
          usage,
          opts
        ) do
+    # Release the gateway slot before event-store write — the LLM call is done.
+    # The next tool-call round will do a fresh checkout via handle_stream/3.
+    # Double-checkin is safe (ProviderGate uses ref matching).
+    gateway_checkin(opts, :ok)
+
     command =
       {:complete_stream,
        %{

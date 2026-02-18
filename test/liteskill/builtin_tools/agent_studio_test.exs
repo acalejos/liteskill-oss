@@ -25,7 +25,8 @@ defmodule Liteskill.BuiltinTools.AgentStudioTest do
         name: "Test Model #{System.unique_integer([:positive])}",
         model_id: "claude-test-#{System.unique_integer([:positive])}",
         provider_id: provider.id,
-        user_id: user.id
+        user_id: user.id,
+        instance_wide: true
       })
 
     {:ok, server} =
