@@ -3,7 +3,7 @@ defmodule Liteskill.BuiltinTools do
     top_level?: true,
     check: [out: false],
     deps: [],
-    exports: [Reports, Wiki, AgentStudio]
+    exports: [Reports, Wiki, AgentStudio, DeepResearch]
 
   @moduledoc """
   Behaviour and registry for built-in tool suites.
@@ -22,7 +22,8 @@ defmodule Liteskill.BuiltinTools do
   @registry [
     Liteskill.BuiltinTools.Reports,
     Liteskill.BuiltinTools.Wiki,
-    Liteskill.BuiltinTools.AgentStudio
+    Liteskill.BuiltinTools.AgentStudio,
+    Liteskill.BuiltinTools.DeepResearch
   ]
 
   def all, do: @registry

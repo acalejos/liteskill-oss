@@ -730,6 +730,19 @@ defmodule Liteskill.Rag do
 
   defp maybe_hash_content(attrs), do: attrs
 
+  @doc """
+  Returns the number of documents in a collection (across all its sources).
+  """
+  def collection_document_count(collection_id) do
+    from(d in Document,
+      join: s in Source,
+      on: s.id == d.source_id,
+      where: s.collection_id == ^collection_id,
+      select: count(d.id)
+    )
+    |> Repo.one()
+  end
+
   # --- Re-embedding support ---
 
   @doc """
