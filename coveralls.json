@@ -39,6 +39,7 @@
     "lib/liteskill_web/markdown.ex",
     "lib/liteskill_web/plugs/live_auth.ex",
     "lib/liteskill/mailer.ex",
+    "lib/liteskill_web/controllers/wiki_export_controller.ex",
     "lib/liteskill/repo.ex",
     "lib/liteskill.ex",
     "lib/liteskill/application.ex",

@@ -10,7 +10,9 @@ defmodule Liteskill.DataSources do
       ConnectorRegistry,
       ContentExtractor,
       Connectors.GoogleDrive,
-      Connectors.Wiki
+      Connectors.Wiki,
+      WikiExport,
+      WikiImport
     ]
 
   @moduledoc """

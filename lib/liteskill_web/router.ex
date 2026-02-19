@@ -70,6 +70,13 @@ defmodule LiteskillWeb.Router do
     end
   end
 
+  # Wiki file operations (authenticated browser routes)
+  scope "/wiki", LiteskillWeb do
+    pipe_through [:browser]
+
+    get "/:space_id/export", WikiExportController, :export
+  end
+
   # Authenticated LiveView routes
   scope "/", LiteskillWeb do
     pipe_through [:browser]

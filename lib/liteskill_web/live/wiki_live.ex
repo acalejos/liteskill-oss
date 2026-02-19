@@ -28,6 +28,8 @@ defmodule LiteskillWeb.WikiLive do
        wiki_sidebar_open: true,
        wiki_form: to_form(%{"title" => "", "content" => ""}, as: :wiki_page),
        show_wiki_form: false,
+       show_import_form: false,
+       import_space_title: "",
        wiki_editing: nil,
        wiki_parent_id: nil,
        wiki_space: nil,
@@ -38,6 +40,7 @@ defmodule LiteskillWeb.WikiLive do
        source_search: "",
        has_admin_access: has_admin_access
      )
+     |> allow_upload(:wiki_import, accept: ~w(.zip), max_entries: 1, max_file_size: 50_000_000)
      |> assign(SharingLive.sharing_assigns()), layout: {LiteskillWeb.Layouts, :chat}}
   end
 
@@ -181,6 +184,9 @@ defmodule LiteskillWeb.WikiLive do
                     <.icon name="hero-bars-4-micro" class="size-3.5" />
                   </button>
                 </div>
+                <button phx-click="show_import_form" class="btn btn-ghost btn-sm gap-1">
+                  <.icon name="hero-arrow-up-tray-micro" class="size-4" /> Import
+                </button>
                 <button phx-click="show_wiki_form" class="btn btn-primary btn-sm gap-1">
                   <.icon name="hero-plus-micro" class="size-4" /> New Space
                 </button>
@@ -272,6 +278,61 @@ defmodule LiteskillWeb.WikiLive do
               </div>
             </.form>
           </ChatComponents.modal>
+
+          <ChatComponents.modal
+            id="wiki-import-modal"
+            title="Import Space"
+            show={@show_import_form}
+            on_close="close_import_form"
+          >
+            <.form
+              for={%{}}
+              phx-submit="import_wiki_space"
+              phx-change="validate_import"
+              class="space-y-4"
+            >
+              <div class="form-control">
+                <label class="label"><span class="label-text">ZIP File *</span></label>
+                <.live_file_input
+                  upload={@uploads.wiki_import}
+                  class="file-input file-input-bordered w-full"
+                />
+                <div
+                  :for={entry <- @uploads.wiki_import.entries}
+                  class="text-xs mt-1 text-base-content/60"
+                >
+                  {entry.client_name} ({Float.round(entry.client_size / 1_000_000, 2)} MB)
+                </div>
+                <div :for={err <- upload_errors(@uploads.wiki_import)} class="text-xs mt-1 text-error">
+                  {upload_error_to_string(err)}
+                </div>
+              </div>
+              <div class="form-control">
+                <label class="label">
+                  <span class="label-text">Space Name (optional override)</span>
+                </label>
+                <input
+                  type="text"
+                  name="space_title"
+                  value={@import_space_title}
+                  placeholder="Leave blank to use name from export"
+                  class="input input-bordered w-full"
+                />
+              </div>
+              <div class="flex justify-end gap-2 pt-2">
+                <button type="button" phx-click="close_import_form" class="btn btn-ghost btn-sm">
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  class="btn btn-primary btn-sm"
+                  disabled={@uploads.wiki_import.entries == []}
+                >
+                  Import
+                </button>
+              </div>
+            </.form>
+          </ChatComponents.modal>
         <% end %>
         <%= if @live_action == :wiki_page_show && @wiki_document do %>
           <%!-- Wiki Page Detail --%>
@@ -318,6 +379,16 @@ defmodule LiteskillWeb.WikiLive do
                 >
                   <.icon name="hero-plus-micro" class="size-4" /> Add Child
                 </button>
+                <.link
+                  :if={
+                    @wiki_user_role in ["manager", "owner"] && @wiki_space &&
+                      is_nil(@wiki_document.parent_document_id)
+                  }
+                  href={~p"/wiki/#{@wiki_space.id}/export"}
+                  class="btn btn-ghost btn-sm gap-1"
+                >
+                  <.icon name="hero-arrow-down-tray-micro" class="size-4" /> Export
+                </.link>
                 <button
                   :if={@wiki_user_role in ["manager", "owner"] && @wiki_space}
                   phx-click="open_sharing"
@@ -545,6 +616,51 @@ defmodule LiteskillWeb.WikiLive do
     {:noreply, assign(socket, show_wiki_form: false, wiki_editing: nil)}
   end
 
+  def handle_event("show_import_form", _params, socket) do
+    {:noreply, assign(socket, show_import_form: true, import_space_title: "")}
+  end
+
+  def handle_event("close_import_form", _params, socket) do
+    {:noreply, assign(socket, show_import_form: false)}
+  end
+
+  def handle_event("validate_import", %{"space_title" => title}, socket) do
+    {:noreply, assign(socket, import_space_title: title)}
+  end
+
+  def handle_event("validate_import", _params, socket) do
+    {:noreply, socket}
+  end
+
+  def handle_event("import_wiki_space", %{"space_title" => title}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    consumed =
+      consume_uploaded_entries(socket, :wiki_import, fn %{path: path}, _entry ->
+        {:ok, File.read!(path)}
+      end)
+
+    case consumed do
+      [zip_binary] ->
+        opts = if title != "", do: [space_title: title], else: []
+
+        case Liteskill.DataSources.WikiImport.import_space(zip_binary, user_id, opts) do
+          {:ok, space_doc} ->
+            {:noreply,
+             socket
+             |> assign(show_import_form: false)
+             |> put_flash(:info, "Space imported successfully")
+             |> push_navigate(to: ~p"/wiki/#{space_doc.id}")}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, action_error("import space", reason))}
+        end
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Please select a ZIP file to import")}
+    end
+  end
+
   def handle_event("create_wiki_page", %{"wiki_page" => params}, socket) do
     user_id = socket.assigns.current_user.id
     source_ref = socket.assigns.current_source.id
@@ -680,4 +796,9 @@ defmodule LiteskillWeb.WikiLive do
 
   defp safe_page(page) when is_integer(page) and page > 0, do: page
   defp safe_page(_), do: 1
+
+  defp upload_error_to_string(:too_large), do: "File is too large (max 50 MB)"
+  defp upload_error_to_string(:not_accepted), do: "Only .zip files are accepted"
+  defp upload_error_to_string(:too_many_files), do: "Only one file at a time"
+  defp upload_error_to_string(_), do: "Upload error"
 end
