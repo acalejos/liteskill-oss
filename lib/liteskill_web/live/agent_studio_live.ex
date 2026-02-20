@@ -534,8 +534,8 @@ defmodule LiteskillWeb.AgentStudioLive do
   def handle_studio_event("add_agent_tool", %{"server_id" => server_id}, socket) do
     agent = socket.assigns.editing_agent
 
-    case Agents.add_tool(agent.id, server_id, nil, socket.assigns.current_user.id) do
-      {:ok, _tool} ->
+    case Agents.grant_tool_access(agent.id, server_id, socket.assigns.current_user.id) do
+      {:ok, _} ->
         {:ok, agent} = Agents.get_agent(agent.id, socket.assigns.current_user.id)
         available = compute_available_servers(socket.assigns.current_user.id, agent)
 
@@ -574,7 +574,7 @@ defmodule LiteskillWeb.AgentStudioLive do
   def handle_studio_event("remove_agent_tool", %{"server_id" => server_id}, socket) do
     agent = socket.assigns.editing_agent
 
-    case Agents.remove_tool(agent.id, server_id, nil, socket.assigns.current_user.id) do
+    case Agents.revoke_tool_access(agent.id, server_id, socket.assigns.current_user.id) do
       {:ok, _} ->
         {:ok, agent} = Agents.get_agent(agent.id, socket.assigns.current_user.id)
         available = compute_available_servers(socket.assigns.current_user.id, agent)
@@ -954,7 +954,7 @@ defmodule LiteskillWeb.AgentStudioLive do
 
   defp compute_available_servers(user_id, agent) do
     all_servers = McpServers.list_servers(user_id)
-    assigned_db_ids = MapSet.new(agent.agent_tools, & &1.mcp_server_id)
+    assigned_db_ids = MapSet.new(Agents.list_tool_server_ids(agent.id))
     assigned_builtin_ids = MapSet.new(get_in(agent.config, ["builtin_server_ids"]) || [])
 
     Enum.reject(all_servers, fn server ->

@@ -149,7 +149,7 @@ defmodule Liteskill.Agents.ToolResolverTest do
           user_id: owner.id
         })
 
-      {:ok, _tool} = Agents.add_tool(agent.id, server.id, nil, owner.id)
+      {:ok, _} = Agents.grant_tool_access(agent.id, server.id, owner.id)
       {:ok, agent} = Agents.get_agent(agent.id, owner.id)
 
       # Should return empty results, not crash

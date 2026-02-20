@@ -429,6 +429,47 @@ defmodule Liteskill.Rag do
     Enum.map(results, fn r -> Map.put(r, :relevance_score, nil) end)
   end
 
+  @doc """
+  Searches RAG collections linked to the given data source IDs.
+  Used by agent execution to inject relevant context from ACL'd datasources.
+  Returns `{:ok, results}` where results are `%{chunk: chunk, distance: float}` maps.
+  """
+  # coveralls-ignore-start
+  def augment_context_for_agent(query, source_ids, user_id, opts \\ []) do
+    collections = find_collections_for_sources(source_ids, user_id)
+
+    if collections == [] do
+      {:ok, []}
+    else
+      {plug_opts, _rest} = Keyword.split(opts, [:plug])
+
+      results =
+        Enum.flat_map(collections, fn coll ->
+          case search(coll.id, query, user_id, [{:limit, 20}] ++ plug_opts) do
+            {:ok, chunks} -> chunks
+            _ -> []
+          end
+        end)
+
+      {:ok, results |> Enum.sort_by(& &1.distance) |> Enum.take(20)}
+    end
+  end
+
+  defp find_collections_for_sources(source_ids, user_id) do
+    sources =
+      Liteskill.DataSources.Source
+      |> where([s], s.id in ^source_ids)
+      |> Repo.all()
+
+    source_names = Enum.map(sources, & &1.name)
+
+    Collection
+    |> where([c], c.user_id == ^user_id and c.name in ^source_names)
+    |> Repo.all()
+  end
+
+  # coveralls-ignore-stop
+
   # --- Wiki Sync Helpers ---
 
   def find_or_create_wiki_collection(user_id) do

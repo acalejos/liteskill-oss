@@ -2055,11 +2055,12 @@ defmodule LiteskillWeb.AgentStudioComponents do
 
   defp build_assigned_servers(agent, builtin_servers) do
     db_entries =
-      Enum.map(agent.agent_tools, fn tool ->
+      Liteskill.Agents.list_accessible_servers(agent.id)
+      |> Enum.map(fn server ->
         %{
-          id: tool.mcp_server_id,
-          name: tool.mcp_server.name,
-          description: tool.mcp_server.description,
+          id: server.id,
+          name: server.name,
+          description: server.description,
           builtin: false
         }
       end)

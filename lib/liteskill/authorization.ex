@@ -342,7 +342,63 @@ defmodule Liteskill.Authorization do
     end
   end
 
+  # --- Agent Grantee Functions ---
+
+  @doc """
+  Grants an agent definition access to an entity (e.g. MCP server, data source).
+  No grantor permission check — called by the agent owner during configuration.
+  """
+  def grant_agent_access(entity_type, entity_id, agent_definition_id, role \\ "viewer") do
+    %EntityAcl{}
+    |> EntityAcl.changeset(%{
+      entity_type: entity_type,
+      entity_id: entity_id,
+      agent_definition_id: agent_definition_id,
+      role: role
+    })
+    |> Repo.insert()
+  end
+
+  @doc "Revokes an agent's access to an entity."
+  def revoke_agent_access(entity_type, entity_id, agent_definition_id) do
+    case get_agent_acl(entity_type, entity_id, agent_definition_id) do
+      nil -> {:error, :not_found}
+      acl -> Repo.delete(acl)
+    end
+  end
+
+  @doc """
+  Returns a subquery of entity IDs the agent definition can access for the given type.
+  Used by ToolResolver and RAG integration to filter resources by agent ACLs.
+  """
+  def agent_accessible_entity_ids(entity_type, agent_definition_id) do
+    from(a in EntityAcl,
+      where: a.entity_type == ^entity_type and a.agent_definition_id == ^agent_definition_id,
+      select: a.entity_id
+    )
+  end
+
+  @doc "Lists all ACLs granted to a specific agent definition for a given entity type."
+  def list_agent_acls(entity_type, agent_definition_id) do
+    from(a in EntityAcl,
+      where: a.entity_type == ^entity_type and a.agent_definition_id == ^agent_definition_id,
+      order_by: [asc: a.inserted_at]
+    )
+    |> Repo.all()
+  end
+
   # --- Private Helpers ---
+
+  defp get_agent_acl(entity_type, entity_id, agent_definition_id) do
+    Repo.one(
+      from(a in EntityAcl,
+        where:
+          a.entity_type == ^entity_type and
+            a.entity_id == ^entity_id and
+            a.agent_definition_id == ^agent_definition_id
+      )
+    )
+  end
 
   defp get_user_acl(entity_type, entity_id, user_id) do
     Repo.one(

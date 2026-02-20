@@ -44,3 +44,6 @@ npm-debug.log
 # dev sqlite
 *.db
 
+# claude
+.claude/
+

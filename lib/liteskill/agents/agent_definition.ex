@@ -3,7 +3,7 @@ defmodule Liteskill.Agents.AgentDefinition do
   Schema for agent definitions — the "character sheet" for an AI agent.
 
   Each definition specifies a name, backstory, opinions, strategy, and
-  references an LLM model. Tools are assigned via the `agent_tools` join table.
+  references an LLM model. Tool access is managed via entity ACLs.
   """
 
   use Ecto.Schema
@@ -27,7 +27,6 @@ defmodule Liteskill.Agents.AgentDefinition do
 
     belongs_to :llm_model, Liteskill.LlmModels.LlmModel
     belongs_to :user, Liteskill.Accounts.User
-    has_many :agent_tools, Liteskill.Agents.AgentTool
     has_many :team_members, Liteskill.Teams.TeamMember
 
     timestamps(type: :utc_datetime)

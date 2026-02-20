@@ -293,6 +293,8 @@ defmodule Liteskill.Runs.Runner do
     {tools, tool_servers} =
       ToolResolver.resolve(agent, user_id, builtin_registry: Liteskill.BuiltinTools)
 
+    datasource_ids = Agents.list_source_ids(agent.id)
+
     log(
       run_id,
       "info",
@@ -315,6 +317,7 @@ defmodule Liteskill.Runs.Runner do
       llm_model: agent.llm_model,
       tools: tools,
       tool_servers: tool_servers,
+      datasource_ids: datasource_ids,
       user_id: user_id,
       run_id: run_id,
       log_fn: &Runs.add_log/5,

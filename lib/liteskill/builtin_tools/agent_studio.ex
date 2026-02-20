@@ -224,7 +224,7 @@ defmodule Liteskill.BuiltinTools.AgentStudio do
              "description" => a.description,
              "strategy" => a.strategy,
              "model" => if(a.llm_model, do: a.llm_model.name, else: nil),
-             "tool_count" => length(a.agent_tools)
+             "tool_count" => length(Agents.list_tool_server_ids(a.id))
            }
          end)
      }}
@@ -541,14 +541,13 @@ defmodule Liteskill.BuiltinTools.AgentStudio do
     mcp_results =
       Enum.map(mcp_tools, fn tool ->
         server_id = tool["server_id"]
-        tool_name = tool["tool_name"]
 
-        case Agents.add_tool(agent_id, server_id, tool_name, user_id) do
-          {:ok, _at} ->
-            %{"server_id" => server_id, "tool_name" => tool_name, "status" => "ok"}
+        case Agents.grant_tool_access(agent_id, server_id, user_id) do
+          {:ok, _} ->
+            %{"server_id" => server_id, "status" => "ok"}
 
           {:error, _} ->
-            %{"server_id" => server_id, "tool_name" => tool_name, "status" => "failed"}
+            %{"server_id" => server_id, "status" => "failed"}
         end
       end)
 
@@ -640,11 +639,11 @@ defmodule Liteskill.BuiltinTools.AgentStudio do
           }
         end,
       "tools" =>
-        Enum.map(agent.agent_tools, fn at ->
+        Agents.list_accessible_servers(agent.id)
+        |> Enum.map(fn server ->
           %{
-            "server_id" => at.mcp_server_id,
-            "server_name" => if(at.mcp_server, do: at.mcp_server.name, else: nil),
-            "tool_name" => at.tool_name
+            "server_id" => server.id,
+            "server_name" => server.name
           }
         end),
       "config" => agent.config

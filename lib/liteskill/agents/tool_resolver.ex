@@ -1,16 +1,24 @@
 defmodule Liteskill.Agents.ToolResolver do
   @moduledoc """
-  Resolves an AgentDefinition's assigned tools (agent_tools + builtin_server_ids)
+  Resolves an AgentDefinition's accessible tools (ACL-based MCP servers + builtin_server_ids)
   into tool specs and server maps for LLM tool calling.
+
+  MCP server access is determined by entity_acls entries with agent_definition_id as grantee.
+  Builtin tools remain config-based (agent.config["builtin_server_ids"]).
   """
 
+  alias Liteskill.Authorization
   alias Liteskill.McpServers
   alias Liteskill.McpServers.Client, as: McpClient
+  alias Liteskill.Repo
 
   require Logger
 
   @doc """
   Resolves all tools for an agent definition.
+
+  Queries entity_acls for MCP servers the agent has access to,
+  calls McpClient.list_tools for each, and merges with builtin tools.
 
   Returns `{tools, tool_servers}` where:
   - `tools` is a list of Bedrock-format tool specs
@@ -28,27 +36,39 @@ defmodule Liteskill.Agents.ToolResolver do
   end
 
   defp resolve_mcp_tools(agent, user_id) do
-    agent.agent_tools
-    |> Enum.reduce({[], %{}}, fn agent_tool, {tools_acc, servers_acc} ->
-      server = agent_tool.mcp_server
+    server_ids =
+      Authorization.agent_accessible_entity_ids("mcp_server", agent.id)
+      |> Repo.all()
 
-      if server do
-        resolve_server_tools(agent_tool, server, user_id, {tools_acc, servers_acc})
-      else
-        # coveralls-ignore-next-line
-        Logger.warning("AgentTool #{agent_tool.id} has no preloaded mcp_server, skipping")
-        {tools_acc, servers_acc}
-      end
-    end)
+    if server_ids == [] do
+      {[], %{}}
+    else
+      servers =
+        Enum.flat_map(server_ids, fn sid ->
+          case McpServers.get_server(sid, user_id) do
+            {:ok, server} -> [server]
+            # coveralls-ignore-next-line
+            _ -> []
+          end
+        end)
+
+      tool_filters = get_in(agent.config, ["tool_filters"]) || %{}
+
+      Enum.reduce(servers, {[], %{}}, fn server, acc ->
+        resolve_server_tools(server, user_id, tool_filters, acc)
+      end)
+    end
   end
 
   # coveralls-ignore-start
-  defp resolve_server_tools(agent_tool, server, user_id, {tools_acc, servers_acc}) do
+  defp resolve_server_tools(server, user_id, tool_filters, {tools_acc, servers_acc}) do
     case McpClient.list_tools(server) do
       {:ok, tool_list} ->
+        filter_names = Map.get(tool_filters, to_string(server.id))
+
         filtered =
-          if agent_tool.tool_name do
-            Enum.filter(tool_list, &(&1["name"] == agent_tool.tool_name))
+          if is_list(filter_names) do
+            Enum.filter(tool_list, &(&1["name"] in filter_names))
           else
             tool_list
           end

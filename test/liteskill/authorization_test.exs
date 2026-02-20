@@ -689,6 +689,86 @@ defmodule Liteskill.AuthorizationTest do
     end
   end
 
+  describe "agent grantee functions" do
+    setup %{user: user} do
+      {:ok, agent} =
+        Liteskill.Agents.create_agent(%{
+          name: "ACL Test Agent #{System.unique_integer([:positive])}",
+          strategy: "direct",
+          user_id: user.id
+        })
+
+      {:ok, server} =
+        Liteskill.McpServers.create_server(%{
+          name: "ACL Test Server #{System.unique_integer([:positive])}",
+          url: "https://acl-test.example.com",
+          user_id: user.id
+        })
+
+      %{agent: agent, server: server}
+    end
+
+    test "grant_agent_access creates agent ACL entry", %{agent: agent, server: server} do
+      assert {:ok, acl} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+      assert acl.entity_type == "mcp_server"
+      assert acl.entity_id == server.id
+      assert acl.agent_definition_id == agent.id
+      assert acl.role == "viewer"
+    end
+
+    test "grant_agent_access with custom role", %{agent: agent, server: server} do
+      assert {:ok, acl} =
+               Authorization.grant_agent_access("mcp_server", server.id, agent.id, "manager")
+
+      assert acl.role == "manager"
+    end
+
+    test "revoke_agent_access removes agent ACL entry", %{agent: agent, server: server} do
+      {:ok, _} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+      assert {:ok, _} = Authorization.revoke_agent_access("mcp_server", server.id, agent.id)
+    end
+
+    test "revoke_agent_access returns not_found when no entry exists", %{
+      agent: agent,
+      server: server
+    } do
+      assert {:error, :not_found} =
+               Authorization.revoke_agent_access("mcp_server", server.id, agent.id)
+    end
+
+    test "agent_accessible_entity_ids returns accessible IDs", %{
+      agent: agent,
+      server: server
+    } do
+      {:ok, _} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+
+      ids =
+        Authorization.agent_accessible_entity_ids("mcp_server", agent.id)
+        |> Liteskill.Repo.all()
+
+      assert server.id in ids
+    end
+
+    test "agent_accessible_entity_ids returns empty for no access", %{agent: agent} do
+      ids =
+        Authorization.agent_accessible_entity_ids("mcp_server", agent.id)
+        |> Liteskill.Repo.all()
+
+      assert ids == []
+    end
+
+    test "list_agent_acls returns all ACLs for an agent", %{agent: agent, server: server} do
+      {:ok, _} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+      acls = Authorization.list_agent_acls("mcp_server", agent.id)
+      assert length(acls) == 1
+      assert hd(acls).entity_id == server.id
+    end
+
+    test "list_agent_acls returns empty when no ACLs exist", %{agent: agent} do
+      assert Authorization.list_agent_acls("mcp_server", agent.id) == []
+    end
+  end
+
   describe "EntityAcl schema" do
     test "validates entity_type inclusion" do
       changeset =
@@ -716,7 +796,7 @@ defmodule Liteskill.AuthorizationTest do
       assert Keyword.has_key?(changeset.errors, :role)
     end
 
-    test "requires user_id or group_id" do
+    test "requires exactly one grantee" do
       changeset =
         EntityAcl.changeset(%EntityAcl{}, %{
           entity_type: "conversation",
@@ -734,6 +814,31 @@ defmodule Liteskill.AuthorizationTest do
           entity_id: Ecto.UUID.generate(),
           user_id: Ecto.UUID.generate(),
           group_id: Ecto.UUID.generate(),
+          role: "viewer"
+        })
+
+      refute changeset.valid?
+    end
+
+    test "accepts agent_definition_id as sole grantee" do
+      changeset =
+        EntityAcl.changeset(%EntityAcl{}, %{
+          entity_type: "mcp_server",
+          entity_id: Ecto.UUID.generate(),
+          agent_definition_id: Ecto.UUID.generate(),
+          role: "viewer"
+        })
+
+      assert changeset.valid?
+    end
+
+    test "rejects user_id and agent_definition_id together" do
+      changeset =
+        EntityAcl.changeset(%EntityAcl{}, %{
+          entity_type: "mcp_server",
+          entity_id: Ecto.UUID.generate(),
+          user_id: Ecto.UUID.generate(),
+          agent_definition_id: Ecto.UUID.generate(),
           role: "viewer"
         })
 

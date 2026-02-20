@@ -2,7 +2,7 @@ defmodule Liteskill.AgentsTest do
   use Liteskill.DataCase, async: false
 
   alias Liteskill.Agents
-  alias Liteskill.Agents.{AgentDefinition, AgentTool}
+  alias Liteskill.Agents.AgentDefinition
   alias Liteskill.McpServers
 
   setup do
@@ -85,10 +85,9 @@ defmodule Liteskill.AgentsTest do
       assert "has already been taken" in errors_on(changeset).name
     end
 
-    test "preloads llm_model and agent_tools", %{owner: owner} do
+    test "preloads llm_model on create", %{owner: owner} do
       assert {:ok, agent} = Agents.create_agent(agent_attrs(owner))
       assert agent.llm_model == nil
-      assert agent.agent_tools == []
     end
 
     test "accepts llm_model_id the user has access to", %{owner: owner} do
@@ -163,7 +162,7 @@ defmodule Liteskill.AgentsTest do
     test "preloads associations on update", %{owner: owner} do
       {:ok, agent} = Agents.create_agent(agent_attrs(owner))
       {:ok, updated} = Agents.update_agent(agent.id, owner.id, %{description: "New desc"})
-      assert updated.agent_tools == []
+      assert updated.llm_model == nil
     end
 
     test "returns changeset error for invalid update", %{owner: owner} do
@@ -293,7 +292,7 @@ defmodule Liteskill.AgentsTest do
     end
   end
 
-  describe "add_tool/4 and remove_tool/4 and list_tools/1" do
+  describe "grant_tool_access/3 and revoke_tool_access/3" do
     setup %{owner: owner} do
       {:ok, agent} = Agents.create_agent(agent_attrs(owner))
 
@@ -307,68 +306,122 @@ defmodule Liteskill.AgentsTest do
       %{agent: agent, server: server}
     end
 
-    test "adds a tool to an agent", %{owner: owner, agent: agent, server: server} do
-      assert {:ok, tool} = Agents.add_tool(agent.id, server.id, "my_tool", owner.id)
-      assert tool.agent_definition_id == agent.id
-      assert tool.mcp_server_id == server.id
-      assert tool.tool_name == "my_tool"
+    test "grants tool access to an agent", %{owner: owner, agent: agent, server: server} do
+      assert {:ok, acl} = Agents.grant_tool_access(agent.id, server.id, owner.id)
+      assert acl.entity_type == "mcp_server"
+      assert acl.entity_id == server.id
+      assert acl.agent_definition_id == agent.id
+      assert acl.role == "viewer"
     end
 
-    test "adds a tool without tool_name", %{owner: owner, agent: agent, server: server} do
-      assert {:ok, tool} = Agents.add_tool(agent.id, server.id, nil, owner.id)
-      assert tool.tool_name == nil
+    test "lists tool server IDs", %{owner: owner, agent: agent, server: server} do
+      {:ok, _} = Agents.grant_tool_access(agent.id, server.id, owner.id)
+      ids = Agents.list_tool_server_ids(agent.id)
+      assert server.id in ids
     end
 
-    test "lists tools for an agent", %{owner: owner, agent: agent, server: server} do
-      {:ok, _} = Agents.add_tool(agent.id, server.id, "tool_a", owner.id)
-      tools = Agents.list_tools(agent.id)
-      assert length(tools) == 1
-      assert hd(tools).tool_name == "tool_a"
+    test "lists accessible servers", %{owner: owner, agent: agent, server: server} do
+      {:ok, _} = Agents.grant_tool_access(agent.id, server.id, owner.id)
+      servers = Agents.list_accessible_servers(agent.id)
+      assert length(servers) == 1
+      assert hd(servers).id == server.id
     end
 
-    test "removes a tool with tool_name", %{owner: owner, agent: agent, server: server} do
-      {:ok, _} = Agents.add_tool(agent.id, server.id, "removable", owner.id)
-      assert {:ok, _} = Agents.remove_tool(agent.id, server.id, "removable", owner.id)
-      assert Agents.list_tools(agent.id) == []
+    test "revokes tool access", %{owner: owner, agent: agent, server: server} do
+      {:ok, _} = Agents.grant_tool_access(agent.id, server.id, owner.id)
+      assert {:ok, _} = Agents.revoke_tool_access(agent.id, server.id, owner.id)
+      assert Agents.list_tool_server_ids(agent.id) == []
     end
 
-    test "removes a tool without tool_name", %{owner: owner, agent: agent, server: server} do
-      {:ok, _} = Agents.add_tool(agent.id, server.id, nil, owner.id)
-      assert {:ok, _} = Agents.remove_tool(agent.id, server.id, nil, owner.id)
-      assert Agents.list_tools(agent.id) == []
-    end
-
-    test "remove_tool returns not_found for missing tool", %{
+    test "revoke_tool_access returns not_found when no access exists", %{
       owner: owner,
       agent: agent,
       server: server
     } do
-      assert {:error, :not_found} =
-               Agents.remove_tool(agent.id, server.id, "nonexistent", owner.id)
+      assert {:error, :not_found} = Agents.revoke_tool_access(agent.id, server.id, owner.id)
     end
 
-    test "add_tool returns forbidden for non-owner", %{other: other, agent: agent, server: server} do
-      assert {:error, :forbidden} = Agents.add_tool(agent.id, server.id, nil, other.id)
+    test "grant_tool_access returns forbidden for non-owner", %{
+      other: other,
+      agent: agent,
+      server: server
+    } do
+      assert {:error, :forbidden} = Agents.grant_tool_access(agent.id, server.id, other.id)
     end
 
-    test "remove_tool returns forbidden for non-owner", %{
+    test "revoke_tool_access returns forbidden for non-owner", %{
       owner: owner,
       other: other,
       agent: agent,
       server: server
     } do
-      {:ok, _} = Agents.add_tool(agent.id, server.id, nil, owner.id)
-      assert {:error, :forbidden} = Agents.remove_tool(agent.id, server.id, nil, other.id)
+      {:ok, _} = Agents.grant_tool_access(agent.id, server.id, owner.id)
+      assert {:error, :forbidden} = Agents.revoke_tool_access(agent.id, server.id, other.id)
     end
 
-    test "add_tool returns not_found for missing agent", %{owner: owner, server: server} do
+    test "grant_tool_access returns not_found for missing agent", %{owner: owner, server: server} do
       assert {:error, :not_found} =
-               Agents.add_tool(Ecto.UUID.generate(), server.id, nil, owner.id)
+               Agents.grant_tool_access(Ecto.UUID.generate(), server.id, owner.id)
     end
 
-    test "remove_tool returns not_found for missing agent", %{owner: owner, server: server} do
+    test "revoke_tool_access returns not_found for missing agent", %{
+      owner: owner,
+      server: server
+    } do
       assert {:error, :not_found} =
-               Agents.remove_tool(Ecto.UUID.generate(), server.id, nil, owner.id)
+               Agents.revoke_tool_access(Ecto.UUID.generate(), server.id, owner.id)
+    end
+  end
+
+  describe "grant_source_access/3 and revoke_source_access/3" do
+    setup %{owner: owner} do
+      {:ok, agent} = Agents.create_agent(agent_attrs(owner))
+
+      {:ok, source} =
+        Liteskill.DataSources.create_source(
+          %{
+            name: "Test Source #{System.unique_integer([:positive])}",
+            source_type: "google_drive"
+          },
+          owner.id
+        )
+
+      %{agent: agent, source: source}
+    end
+
+    test "grants source access to an agent", %{owner: owner, agent: agent, source: source} do
+      assert {:ok, acl} = Agents.grant_source_access(agent.id, source.id, owner.id)
+      assert acl.entity_type == "source"
+      assert acl.entity_id == source.id
+      assert acl.agent_definition_id == agent.id
+    end
+
+    test "lists source IDs", %{owner: owner, agent: agent, source: source} do
+      {:ok, _} = Agents.grant_source_access(agent.id, source.id, owner.id)
+      ids = Agents.list_source_ids(agent.id)
+      assert source.id in ids
+    end
+
+    test "revokes source access", %{owner: owner, agent: agent, source: source} do
+      {:ok, _} = Agents.grant_source_access(agent.id, source.id, owner.id)
+      assert {:ok, _} = Agents.revoke_source_access(agent.id, source.id, owner.id)
+      assert Agents.list_source_ids(agent.id) == []
+    end
+
+    test "grant_source_access returns forbidden for non-owner", %{
+      other: other,
+      agent: agent,
+      source: source
+    } do
+      assert {:error, :forbidden} = Agents.grant_source_access(agent.id, source.id, other.id)
+    end
+
+    test "revoke_source_access returns not_found when no access exists", %{
+      owner: owner,
+      agent: agent,
+      source: source
+    } do
+      assert {:error, :not_found} = Agents.revoke_source_access(agent.id, source.id, owner.id)
     end
   end
 
@@ -384,16 +437,6 @@ defmodule Liteskill.AgentsTest do
 
         assert changeset.valid?
       end
-    end
-  end
-
-  describe "AgentTool.changeset/2" do
-    test "validates required fields" do
-      changeset = AgentTool.changeset(%AgentTool{}, %{})
-      refute changeset.valid?
-      errors = errors_on(changeset)
-      assert "can't be blank" in errors.agent_definition_id
-      assert "can't be blank" in errors.mcp_server_id
     end
   end
 end

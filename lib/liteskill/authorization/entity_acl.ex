@@ -3,7 +3,10 @@ defmodule Liteskill.Authorization.EntityAcl do
   Schema for centralized entity access control entries.
 
   Supports any entity type (conversation, report, source, mcp_server)
-  with user-based or group-based access at three levels: owner, manager, viewer.
+  with user-based, group-based, or agent-based access at four levels:
+  owner, manager, editor, viewer.
+
+  Exactly one of user_id, group_id, or agent_definition_id must be set.
   """
 
   use Ecto.Schema
@@ -19,6 +22,7 @@ defmodule Liteskill.Authorization.EntityAcl do
 
     belongs_to :user, Liteskill.Accounts.User
     belongs_to :group, Liteskill.Groups.Group
+    field :agent_definition_id, :binary_id
 
     timestamps(type: :utc_datetime)
   end
@@ -40,35 +44,52 @@ defmodule Liteskill.Authorization.EntityAcl do
 
   def changeset(acl, attrs) do
     acl
-    |> cast(attrs, [:entity_type, :entity_id, :user_id, :group_id, :role])
+    |> cast(attrs, [:entity_type, :entity_id, :user_id, :group_id, :agent_definition_id, :role])
     |> validate_required([:entity_type, :entity_id, :role])
     |> validate_inclusion(:entity_type, @valid_entity_types)
     |> validate_inclusion(:role, @valid_roles)
-    |> validate_user_or_group()
+    |> validate_exactly_one_grantee()
     |> unique_constraint([:entity_type, :entity_id, :user_id],
       name: :entity_acls_entity_user_idx
     )
     |> unique_constraint([:entity_type, :entity_id, :group_id],
       name: :entity_acls_entity_group_idx
     )
-    |> check_constraint(:user_id, name: :entity_acl_user_or_group)
+    |> unique_constraint([:entity_type, :entity_id, :agent_definition_id],
+      name: :entity_acls_entity_agent_idx
+    )
+    |> check_constraint(:user_id, name: :entity_acl_exactly_one_grantee)
     |> foreign_key_constraint(:user_id)
     |> foreign_key_constraint(:group_id)
+    |> foreign_key_constraint(:agent_definition_id)
   end
 
-  defp validate_user_or_group(changeset) do
+  defp validate_exactly_one_grantee(changeset) do
     user_id = get_field(changeset, :user_id)
     group_id = get_field(changeset, :group_id)
+    agent_definition_id = get_field(changeset, :agent_definition_id)
 
-    cond do
-      is_nil(user_id) and is_nil(group_id) ->
-        add_error(changeset, :user_id, "either user_id or group_id must be set")
+    set_count =
+      [user_id, group_id, agent_definition_id]
+      |> Enum.count(&(not is_nil(&1)))
 
-      not is_nil(user_id) and not is_nil(group_id) ->
-        add_error(changeset, :user_id, "only one of user_id or group_id can be set")
-
-      true ->
+    case set_count do
+      1 ->
         changeset
+
+      0 ->
+        add_error(
+          changeset,
+          :user_id,
+          "exactly one of user_id, group_id, or agent_definition_id must be set"
+        )
+
+      _ ->
+        add_error(
+          changeset,
+          :user_id,
+          "only one of user_id, group_id, or agent_definition_id can be set"
+        )
     end
   end
 end

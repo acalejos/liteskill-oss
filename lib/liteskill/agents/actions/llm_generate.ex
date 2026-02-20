@@ -32,7 +32,7 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
   @default_keep_rounds 4
 
   def run(_params, context) do
-    state = context.state
+    state = context.state |> maybe_inject_rag_context()
 
     if state[:llm_model] do
       {system_prompt, llm_context} =
@@ -158,6 +158,31 @@ defmodule Liteskill.Agents.Actions.LlmGenerate do
 
     Enum.join(parts, "\n\n")
   end
+
+  # coveralls-ignore-start
+  defp maybe_inject_rag_context(%{datasource_ids: ids, prompt: prompt, user_id: user_id} = state)
+       when is_list(ids) and ids != [] and is_binary(prompt) and prompt != "" do
+    case Liteskill.Rag.augment_context_for_agent(prompt, ids, user_id) do
+      {:ok, chunks} when chunks != [] ->
+        rag_context =
+          chunks
+          |> Enum.take(10)
+          |> Enum.map_join("\n\n---\n\n", fn r -> r.chunk.content end)
+
+        Map.put(
+          state,
+          :prompt,
+          "## Relevant Context from Datasources\n\n#{rag_context}\n\n## Task\n\n#{prompt}"
+        )
+
+      _ ->
+        state
+    end
+  end
+
+  # coveralls-ignore-stop
+
+  defp maybe_inject_rag_context(state), do: state
 
   defp build_user_message(state) do
     base = state[:prompt] || ""

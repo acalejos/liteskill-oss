@@ -986,11 +986,11 @@ defmodule Liteskill.BuiltinTools.AgentStudioTest do
       assert length(data["tools_assigned"]) == 2
       assert Enum.all?(data["tools_assigned"], &(&1["status"] == "ok"))
 
-      # Verify builtin IDs ended up in config, not as AgentTool records
+      # Verify builtin IDs ended up in config
       {:ok, agent} = Liteskill.Agents.get_agent(data["id"], user.id)
       assert "builtin:wiki" in agent.config["builtin_server_ids"]
       assert "builtin:reports" in agent.config["builtin_server_ids"]
-      assert agent.agent_tools == []
+      assert Liteskill.Agents.list_tool_server_ids(agent.id) == []
     end
 
     test "create agent with mixed builtin and MCP tools", %{user: user, server: server} do
@@ -1016,7 +1016,7 @@ defmodule Liteskill.BuiltinTools.AgentStudioTest do
 
       {:ok, agent} = Liteskill.Agents.get_agent(data["id"], user.id)
       assert "builtin:wiki" in agent.config["builtin_server_ids"]
-      assert length(agent.agent_tools) == 1
+      assert length(Liteskill.Agents.list_tool_server_ids(agent.id)) == 1
     end
 
     test "create agent with failed tool assignment", %{user: user} do

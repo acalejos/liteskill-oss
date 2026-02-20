@@ -8,18 +8,21 @@ defmodule Liteskill.Agents do
       Liteskill.LLM,
       Liteskill.LlmGateway,
       Liteskill.Usage,
-      Liteskill.LlmModels
+      Liteskill.LlmModels,
+      Liteskill.Rag,
+      Liteskill.DataSources
     ],
-    exports: [AgentDefinition, AgentTool, ToolResolver, JidoAgent, Actions.LlmGenerate]
+    exports: [AgentDefinition, ToolResolver, JidoAgent, Actions.LlmGenerate]
 
   @moduledoc """
   Context for managing agent definitions.
 
   Agent definitions are the "character sheets" for AI agents — name, backstory,
-  opinions, strategy, model, and tool assignments. All operations are ACL-controlled.
+  opinions, strategy, model, and tool/datasource access via ACLs.
+  All operations are ACL-controlled.
   """
 
-  alias Liteskill.Agents.{AgentDefinition, AgentTool}
+  alias Liteskill.Agents.AgentDefinition
   alias Liteskill.Authorization
   alias Liteskill.Repo
 
@@ -34,10 +37,7 @@ defmodule Liteskill.Agents do
          :ok <- validate_model_access(attrs[:llm_model_id] || attrs["llm_model_id"], user_id) do
       %AgentDefinition{}
       |> AgentDefinition.changeset(attrs)
-      |> Authorization.create_with_owner_acl("agent_definition", [
-        :llm_model,
-        agent_tools: :mcp_server
-      ])
+      |> Authorization.create_with_owner_acl("agent_definition", [:llm_model])
     end
   end
 
@@ -53,7 +53,7 @@ defmodule Liteskill.Agents do
           |> AgentDefinition.changeset(attrs)
           |> Repo.update()
           |> case do
-            {:ok, updated} -> {:ok, Repo.preload(updated, [:llm_model, agent_tools: :mcp_server])}
+            {:ok, updated} -> {:ok, Repo.preload(updated, [:llm_model])}
             error -> error
           end
         end
@@ -80,13 +80,13 @@ defmodule Liteskill.Agents do
     AgentDefinition
     |> where([a], a.user_id == ^user_id or a.id in subquery(accessible_ids))
     |> order_by([a], asc: a.name)
-    |> preload([:llm_model, agent_tools: :mcp_server])
+    |> preload([:llm_model])
     |> Repo.all()
   end
 
   def get_agent(id, user_id) do
     case Repo.get(AgentDefinition, id)
-         |> Repo.preload(llm_model: :provider, agent_tools: :mcp_server) do
+         |> Repo.preload(llm_model: :provider) do
       nil ->
         {:error, :not_found}
 
@@ -103,66 +103,80 @@ defmodule Liteskill.Agents do
   end
 
   def get_agent!(id) do
-    Repo.get!(AgentDefinition, id) |> Repo.preload(llm_model: :provider, agent_tools: :mcp_server)
+    Repo.get!(AgentDefinition, id) |> Repo.preload(llm_model: :provider)
   end
 
-  # --- Tool Management ---
+  # --- Agent Resource Access (Tools) ---
 
-  def add_tool(agent_definition_id, mcp_server_id, tool_name \\ nil, user_id) do
-    case Repo.get(AgentDefinition, agent_definition_id) do
-      nil ->
-        {:error, :not_found}
-
-      agent ->
-        with {:ok, _agent} <- authorize_owner(agent, user_id) do
-          %AgentTool{}
-          |> AgentTool.changeset(%{
-            agent_definition_id: agent_definition_id,
-            mcp_server_id: mcp_server_id,
-            tool_name: tool_name
-          })
-          |> Repo.insert()
-        end
+  @doc "Grants an agent access to an MCP server."
+  def grant_tool_access(agent_definition_id, mcp_server_id, user_id) do
+    with {:ok, agent} <- get_and_authorize_owner(agent_definition_id, user_id),
+         :ok <- verify_entity_exists(Liteskill.McpServers.McpServer, mcp_server_id) do
+      Authorization.grant_agent_access("mcp_server", mcp_server_id, agent.id)
     end
   end
 
-  def remove_tool(agent_definition_id, mcp_server_id, tool_name \\ nil, user_id) do
-    case Repo.get(AgentDefinition, agent_definition_id) do
-      nil ->
-        {:error, :not_found}
-
-      agent ->
-        with {:ok, _agent} <- authorize_owner(agent, user_id) do
-          query =
-            from(at in AgentTool,
-              where:
-                at.agent_definition_id == ^agent_definition_id and
-                  at.mcp_server_id == ^mcp_server_id
-            )
-
-          query =
-            if tool_name do
-              where(query, [at], at.tool_name == ^tool_name)
-            else
-              where(query, [at], is_nil(at.tool_name))
-            end
-
-          case Repo.one(query) do
-            nil -> {:error, :not_found}
-            tool -> Repo.delete(tool)
-          end
-        end
+  @doc "Revokes an agent's access to an MCP server."
+  def revoke_tool_access(agent_definition_id, mcp_server_id, user_id) do
+    with {:ok, agent} <- get_and_authorize_owner(agent_definition_id, user_id) do
+      Authorization.revoke_agent_access("mcp_server", mcp_server_id, agent.id)
     end
   end
 
-  def list_tools(agent_definition_id) do
-    AgentTool
-    |> where([at], at.agent_definition_id == ^agent_definition_id)
-    |> preload(:mcp_server)
+  @doc "Lists MCP server IDs accessible to an agent."
+  def list_tool_server_ids(agent_definition_id) do
+    Authorization.agent_accessible_entity_ids("mcp_server", agent_definition_id)
+    |> Repo.all()
+  end
+
+  @doc "Lists MCP servers accessible to an agent (full structs)."
+  def list_accessible_servers(agent_definition_id) do
+    server_ids = list_tool_server_ids(agent_definition_id)
+
+    Liteskill.McpServers.McpServer
+    |> where([s], s.id in ^server_ids)
+    |> order_by([s], asc: s.name)
+    |> Repo.all()
+  end
+
+  # --- Agent Resource Access (Data Sources) ---
+
+  @doc "Grants an agent access to a data source."
+  def grant_source_access(agent_definition_id, source_id, user_id) do
+    with {:ok, agent} <- get_and_authorize_owner(agent_definition_id, user_id),
+         :ok <- verify_entity_exists(Liteskill.DataSources.Source, source_id) do
+      Authorization.grant_agent_access("source", source_id, agent.id)
+    end
+  end
+
+  @doc "Revokes an agent's access to a data source."
+  def revoke_source_access(agent_definition_id, source_id, user_id) do
+    with {:ok, agent} <- get_and_authorize_owner(agent_definition_id, user_id) do
+      Authorization.revoke_agent_access("source", source_id, agent.id)
+    end
+  end
+
+  @doc "Lists data source IDs accessible to an agent."
+  def list_source_ids(agent_definition_id) do
+    Authorization.agent_accessible_entity_ids("source", agent_definition_id)
     |> Repo.all()
   end
 
   # --- Private ---
+
+  defp get_and_authorize_owner(agent_definition_id, user_id) do
+    case Repo.get(AgentDefinition, agent_definition_id) do
+      nil -> {:error, :not_found}
+      agent -> authorize_owner(agent, user_id)
+    end
+  end
+
+  defp verify_entity_exists(schema, id) do
+    case Repo.get(schema, id) do
+      nil -> {:error, :not_found}
+      _ -> :ok
+    end
+  end
 
   defp authorize_owner(entity, user_id), do: Authorization.authorize_owner(entity, user_id)
 
