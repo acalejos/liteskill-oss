@@ -15,6 +15,7 @@ defmodule LiteskillWeb.ProfileLive do
   alias Liteskill.LlmProviders
   alias Liteskill.LlmProviders.LlmProvider
   alias LiteskillWeb.AdminLive
+  alias LiteskillWeb.SettingsLive
 
   @profile_actions [:info, :password, :user_providers, :user_models]
 
@@ -85,6 +86,8 @@ defmodule LiteskillWeb.ProfileLive do
   attr :user_llm_models, :list
   attr :user_editing_model, :any
   attr :user_model_form, :any
+  attr :settings_mode, :boolean, default: false
+  attr :settings_action, :atom, default: nil
 
   def profile(assigns) do
     ~H"""
@@ -97,21 +100,25 @@ defmodule LiteskillWeb.ProfileLive do
         >
           <.icon name="hero-bars-3-micro" class="size-5" />
         </button>
-        <h1 class="text-lg font-semibold">Profile</h1>
+        <h1 class="text-lg font-semibold">{if @settings_mode, do: "Settings", else: "Profile"}</h1>
       </div>
     </header>
 
     <div class="border-b border-base-300 px-4 flex-shrink-0">
-      <div class="flex gap-1 overflow-x-auto" role="tablist">
-        <.tab_link label="Info" to={~p"/profile"} active={@live_action == :info} />
-        <.tab_link label="Password" to={~p"/profile/password"} active={@live_action == :password} />
-        <.tab_link
-          label="Providers"
-          to={~p"/profile/providers"}
-          active={@live_action == :user_providers}
-        />
-        <.tab_link label="Models" to={~p"/profile/models"} active={@live_action == :user_models} />
-      </div>
+      <%= if @settings_mode do %>
+        <SettingsLive.settings_tab_bar active={@settings_action} />
+      <% else %>
+        <div class="flex gap-1 overflow-x-auto" role="tablist">
+          <.tab_link label="Info" to={~p"/profile"} active={@live_action == :info} />
+          <.tab_link label="Password" to={~p"/profile/password"} active={@live_action == :password} />
+          <.tab_link
+            label="Providers"
+            to={~p"/profile/providers"}
+            active={@live_action == :user_providers}
+          />
+          <.tab_link label="Models" to={~p"/profile/models"} active={@live_action == :user_models} />
+        </div>
+      <% end %>
     </div>
 
     <div class="flex-1 overflow-y-auto p-6">

@@ -30,6 +30,9 @@ defmodule Liteskill.Application do
                Liteskill.Rbac.ensure_system_roles()
                Liteskill.LlmProviders.ensure_env_providers()
                Liteskill.Settings.get()
+
+               if Liteskill.SingleUser.enabled?(),
+                 do: Liteskill.SingleUser.auto_provision_admin()
              end}
         ),
         # coveralls-ignore-stop

@@ -18,6 +18,7 @@ defmodule LiteskillWeb.AdminLive do
   alias Liteskill.LlmProviders.LlmProvider
   alias Liteskill.Settings
   alias Liteskill.Usage
+  alias LiteskillWeb.SettingsLive
   alias LiteskillWeb.SourcesComponents
 
   @admin_actions [
@@ -310,6 +311,8 @@ defmodule LiteskillWeb.AdminLive do
   attr :rag_confirm_input, :string, default: ""
   attr :rag_selected_model_id, :string, default: nil
   attr :rag_reembed_in_progress, :boolean, default: false
+  attr :settings_mode, :boolean, default: false
+  attr :settings_action, :atom, default: nil
 
   def admin_panel(assigns) do
     ~H"""
@@ -322,53 +325,57 @@ defmodule LiteskillWeb.AdminLive do
         >
           <.icon name="hero-bars-3-micro" class="size-5" />
         </button>
-        <h1 class="text-lg font-semibold">Admin</h1>
+        <h1 class="text-lg font-semibold">{if @settings_mode, do: "Settings", else: "Admin"}</h1>
       </div>
     </header>
 
     <div class="border-b border-base-300 px-4 flex-shrink-0">
-      <div class="flex gap-1 overflow-x-auto" role="tablist">
-        <.tab_link
-          label="Usage"
-          to={~p"/admin/usage"}
-          active={@live_action == :admin_usage}
-        />
-        <.tab_link
-          label="Server"
-          to={~p"/admin/servers"}
-          active={@live_action == :admin_servers}
-        />
-        <.tab_link
-          label="Users"
-          to={~p"/admin/users"}
-          active={@live_action == :admin_users}
-        />
-        <.tab_link
-          label="Groups"
-          to={~p"/admin/groups"}
-          active={@live_action == :admin_groups}
-        />
-        <.tab_link
-          label="Providers"
-          to={~p"/admin/providers"}
-          active={@live_action == :admin_providers}
-        />
-        <.tab_link
-          label="Models"
-          to={~p"/admin/models"}
-          active={@live_action == :admin_models}
-        />
-        <.tab_link
-          label="Roles"
-          to={~p"/admin/roles"}
-          active={@live_action == :admin_roles}
-        />
-        <.tab_link
-          label="RAG"
-          to={~p"/admin/rag"}
-          active={@live_action == :admin_rag}
-        />
-      </div>
+      <%= if @settings_mode do %>
+        <SettingsLive.settings_tab_bar active={@settings_action} />
+      <% else %>
+        <div class="flex gap-1 overflow-x-auto" role="tablist">
+          <.tab_link
+            label="Usage"
+            to={~p"/admin/usage"}
+            active={@live_action == :admin_usage}
+          />
+          <.tab_link
+            label="Server"
+            to={~p"/admin/servers"}
+            active={@live_action == :admin_servers}
+          />
+          <.tab_link
+            label="Users"
+            to={~p"/admin/users"}
+            active={@live_action == :admin_users}
+          />
+          <.tab_link
+            label="Groups"
+            to={~p"/admin/groups"}
+            active={@live_action == :admin_groups}
+          />
+          <.tab_link
+            label="Providers"
+            to={~p"/admin/providers"}
+            active={@live_action == :admin_providers}
+          />
+          <.tab_link
+            label="Models"
+            to={~p"/admin/models"}
+            active={@live_action == :admin_models}
+          />
+          <.tab_link
+            label="Roles"
+            to={~p"/admin/roles"}
+            active={@live_action == :admin_roles}
+          />
+          <.tab_link
+            label="RAG"
+            to={~p"/admin/rag"}
+            active={@live_action == :admin_rag}
+          />
+        </div>
+      <% end %>
     </div>
 
     <div class="flex-1 overflow-y-auto p-6">
@@ -1726,7 +1733,13 @@ defmodule LiteskillWeb.AdminLive do
               <.icon name="hero-information-circle-micro" class="size-5" />
               <span>
                 No embedding models configured. Add a model with type "embedding"
-                in the <.link navigate={~p"/admin/models"} class="link link-primary">Models</.link>
+                in the
+                <.link
+                  navigate={if @settings_mode, do: ~p"/settings/models", else: ~p"/admin/models"}
+                  class="link link-primary"
+                >
+                  Models
+                </.link>
                 tab first.
               </span>
             </div>

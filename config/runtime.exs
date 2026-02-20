@@ -61,6 +61,11 @@ if bedrock_overrides != [] do
   config :liteskill, Liteskill.LLM, Keyword.merge(existing, bedrock_overrides)
 end
 
+# Single-user mode (desktop / self-hosted)
+if System.get_env("SINGLE_USER_MODE") in ~w(true 1 yes) do
+  config :liteskill, :single_user_mode, true
+end
+
 # Encryption key for sensitive fields (MCP API keys, etc.)
 if encryption_key = System.get_env("ENCRYPTION_KEY") do
   config :liteskill, :encryption_key, encryption_key

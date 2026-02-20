@@ -13,6 +13,7 @@ defmodule LiteskillWeb.ChatLive do
   alias LiteskillWeb.McpComponents
   alias LiteskillWeb.AdminLive
   alias LiteskillWeb.ProfileLive
+  alias LiteskillWeb.SettingsLive
   alias LiteskillWeb.{PipelineComponents, PipelineLive}
   alias LiteskillWeb.{ReportComponents, ReportsLive}
   alias LiteskillWeb.{AgentStudioComponents, AgentStudioLive}
@@ -141,7 +142,9 @@ defmodule LiteskillWeb.ChatLive do
        # Conversation usage modal
        show_usage_modal: false,
        usage_modal_data: nil,
-       has_admin_access: Liteskill.Rbac.has_any_admin_permission?(user.id)
+       has_admin_access: Liteskill.Rbac.has_any_admin_permission?(user.id),
+       single_user_mode: Liteskill.SingleUser.enabled?(),
+       settings_mode: false
      )
      |> assign(ReportsLive.reports_assigns())
      |> assign(PipelineLive.pipeline_assigns())
@@ -179,7 +182,8 @@ defmodule LiteskillWeb.ChatLive do
       messages: [],
       streaming: false,
       stream_content: "",
-      pending_tool_calls: []
+      pending_tool_calls: [],
+      settings_mode: false
     )
     |> ProfileLive.apply_profile_action(action, socket.assigns.current_user)
   end
@@ -204,9 +208,43 @@ defmodule LiteskillWeb.ChatLive do
       messages: [],
       streaming: false,
       stream_content: "",
-      pending_tool_calls: []
+      pending_tool_calls: [],
+      settings_mode: false
     )
     |> AdminLive.apply_admin_action(action, socket.assigns.current_user)
+  end
+
+  defp apply_action(socket, action, _params)
+       when action in [
+              :settings_usage,
+              :settings_general,
+              :settings_providers,
+              :settings_models,
+              :settings_rag,
+              :settings_account
+            ] do
+    maybe_unsubscribe(socket)
+    user = socket.assigns.current_user
+
+    socket =
+      socket
+      |> assign(
+        conversation: nil,
+        messages: [],
+        streaming: false,
+        stream_content: "",
+        pending_tool_calls: [],
+        settings_mode: true
+      )
+
+    case action do
+      :settings_account ->
+        ProfileLive.apply_profile_action(socket, :info, user)
+
+      _ ->
+        admin_action = SettingsLive.settings_to_admin_action(action)
+        AdminLive.apply_admin_action(socket, admin_action, user)
+    end
   end
 
   defp apply_action(socket, :index, _params) do
@@ -461,6 +499,7 @@ defmodule LiteskillWeb.ChatLive do
         active_conversation_id={@conversation && @conversation.id}
         current_user={@current_user}
         has_admin_access={@has_admin_access}
+        single_user_mode={@single_user_mode}
       />
 
       <%!-- Main Area --%>
@@ -1141,6 +1180,71 @@ defmodule LiteskillWeb.ChatLive do
             rag_reembed_in_progress={@rag_reembed_in_progress}
           />
         <% end %>
+        <%= if @settings_mode and @live_action == :settings_account do %>
+          <ProfileLive.profile
+            live_action={:info}
+            current_user={@current_user}
+            sidebar_open={@sidebar_open}
+            password_form={@password_form}
+            password_error={@password_error}
+            password_success={@password_success}
+            user_llm_providers={@user_llm_providers}
+            user_editing_provider={@user_editing_provider}
+            user_provider_form={@user_provider_form}
+            user_llm_models={@user_llm_models}
+            user_editing_model={@user_editing_model}
+            user_model_form={@user_model_form}
+            settings_mode={true}
+            settings_action={@live_action}
+          />
+        <% end %>
+        <%= if @settings_mode and SettingsLive.settings_action?(@live_action) and @live_action != :settings_account do %>
+          <AdminLive.admin_panel
+            live_action={SettingsLive.settings_to_admin_action(@live_action)}
+            current_user={@current_user}
+            sidebar_open={@sidebar_open}
+            profile_users={@profile_users}
+            profile_groups={@profile_groups}
+            group_detail={@group_detail}
+            group_members={@group_members}
+            temp_password_user_id={@temp_password_user_id}
+            llm_models={@llm_models}
+            editing_llm_model={@editing_llm_model}
+            llm_model_form={@llm_model_form}
+            llm_providers={@llm_providers}
+            editing_llm_provider={@editing_llm_provider}
+            llm_provider_form={@llm_provider_form}
+            server_settings={@server_settings}
+            invitations={@invitations}
+            new_invitation_url={@new_invitation_url}
+            admin_usage_data={@admin_usage_data}
+            admin_usage_period={@admin_usage_period}
+            rbac_roles={@rbac_roles}
+            editing_role={@editing_role}
+            role_form={@role_form}
+            role_users={@role_users}
+            role_groups={@role_groups}
+            role_user_search={@role_user_search}
+            setup_step={@setup_step}
+            setup_form={@setup_form}
+            setup_error={@setup_error}
+            setup_selected_permissions={@setup_selected_permissions}
+            setup_data_sources={@setup_data_sources}
+            setup_selected_sources={@setup_selected_sources}
+            setup_sources_to_configure={@setup_sources_to_configure}
+            setup_current_config_index={@setup_current_config_index}
+            setup_config_form={@setup_config_form}
+            rag_embedding_models={@rag_embedding_models}
+            rag_current_model={@rag_current_model}
+            rag_stats={@rag_stats}
+            rag_confirm_change={@rag_confirm_change}
+            rag_confirm_input={@rag_confirm_input}
+            rag_selected_model_id={@rag_selected_model_id}
+            rag_reembed_in_progress={@rag_reembed_in_progress}
+            settings_mode={true}
+            settings_action={@live_action}
+          />
+        <% end %>
         <%= if @live_action == :conversations do %>
           <div class="flex-1 flex flex-col min-w-0">
             <header class="px-4 py-3 border-b border-base-300 flex-shrink-0">
@@ -1389,7 +1493,7 @@ defmodule LiteskillWeb.ChatLive do
             sidebar_open={@sidebar_open}
           />
         <% end %>
-        <%= if @live_action not in [:sources, :source_show, :source_document_show, :mcp_servers, :reports, :report_show, :conversations, :pipeline, :agent_studio, :agents, :agent_new, :agent_show, :agent_edit, :teams, :team_new, :team_show, :team_edit, :runs, :run_new, :run_show, :run_log_show, :schedules, :schedule_new, :schedule_show] and not ProfileLive.profile_action?(@live_action) and not AdminLive.admin_action?(@live_action) do %>
+        <%= if @live_action not in [:sources, :source_show, :source_document_show, :mcp_servers, :reports, :report_show, :conversations, :pipeline, :agent_studio, :agents, :agent_new, :agent_show, :agent_edit, :teams, :team_new, :team_show, :team_edit, :runs, :run_new, :run_show, :run_log_show, :schedules, :schedule_new, :schedule_show] and not ProfileLive.profile_action?(@live_action) and not AdminLive.admin_action?(@live_action) and not SettingsLive.settings_action?(@live_action) do %>
           <%= if @conversation do %>
             <%!-- Active conversation --%>
             <div class="flex flex-1 min-w-0 overflow-hidden">

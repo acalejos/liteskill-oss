@@ -36,6 +36,7 @@
     "lib/liteskill/schedules/schedule_worker.ex",
     "lib/liteskill_web/live/profile_live.ex",
     "lib/liteskill_web/live/admin_live.ex",
+    "lib/liteskill_web/live/settings_live.ex",
     "lib/liteskill_web/markdown.ex",
     "lib/liteskill_web/plugs/live_auth.ex",
     "lib/liteskill/mailer.ex",

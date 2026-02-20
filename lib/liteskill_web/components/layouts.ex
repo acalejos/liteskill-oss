@@ -122,6 +122,7 @@ defmodule LiteskillWeb.Layouts do
   attr :active_conversation_id, :any, default: nil
   attr :current_user, :map, required: true
   attr :has_admin_access, :boolean, required: true
+  attr :single_user_mode, :boolean, default: false
 
   def sidebar(assigns) do
     ~H"""
@@ -250,24 +251,28 @@ defmodule LiteskillWeb.Layouts do
       </div>
 
       <div
-        :if={@has_admin_access}
+        :if={@has_admin_access or @single_user_mode}
         class="p-2 border-t border-base-300 min-w-64"
       >
         <.link
-          navigate={~p"/admin"}
+          navigate={if @single_user_mode, do: ~p"/settings", else: ~p"/admin"}
           class={[
             "flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm transition-colors",
-            if(LiteskillWeb.AdminLive.admin_action?(@live_action),
+            if(
+              LiteskillWeb.AdminLive.admin_action?(@live_action) or
+                LiteskillWeb.SettingsLive.settings_action?(@live_action),
               do: "bg-primary/10 text-primary font-medium",
               else: "hover:bg-base-200 text-base-content/70"
             )
           ]}
         >
-          <.icon name="hero-cog-6-tooth-micro" class="size-4" /> Admin
+          <.icon name="hero-cog-6-tooth-micro" class="size-4" /> {if @single_user_mode,
+            do: "Settings",
+            else: "Admin"}
         </.link>
       </div>
 
-      <div class="p-3 border-t border-base-300 min-w-64">
+      <div :if={!@single_user_mode} class="p-3 border-t border-base-300 min-w-64">
         <div class="flex items-center gap-2">
           <.link
             navigate={~p"/profile"}

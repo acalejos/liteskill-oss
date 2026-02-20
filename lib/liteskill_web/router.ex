@@ -90,6 +90,13 @@ defmodule LiteskillWeb.Router do
       live "/profile/password", ChatLive, :password
       live "/profile/providers", ChatLive, :user_providers
       live "/profile/models", ChatLive, :user_models
+      # Settings routes (single-user mode unified settings page)
+      live "/settings", ChatLive, :settings_usage
+      live "/settings/general", ChatLive, :settings_general
+      live "/settings/providers", ChatLive, :settings_providers
+      live "/settings/models", ChatLive, :settings_models
+      live "/settings/rag", ChatLive, :settings_rag
+      live "/settings/account", ChatLive, :settings_account
       live "/wiki", WikiLive, :wiki
       live "/wiki/:document_id", WikiLive, :wiki_page_show
       live "/sources", ChatLive, :sources

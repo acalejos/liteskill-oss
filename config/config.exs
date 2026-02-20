@@ -60,6 +60,9 @@ config :ueberauth, Ueberauth,
     oidc: {Ueberauth.Strategy.OIDCC, []}
   ]
 
+# Single-user mode (desktop / self-hosted). Set SINGLE_USER_MODE=true to enable.
+config :liteskill, :single_user_mode, false
+
 # Configure LLM defaults (region/token used by CohereClient for RAG embeddings)
 config :liteskill, Liteskill.LLM, bedrock_region: "us-east-1"
 

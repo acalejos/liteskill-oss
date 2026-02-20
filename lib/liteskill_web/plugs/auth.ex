@@ -7,6 +7,7 @@ defmodule LiteskillWeb.Plugs.Auth do
   import Phoenix.Controller
 
   alias Liteskill.Accounts
+  alias Liteskill.SingleUser
 
   def init(action), do: action
 
@@ -14,15 +15,19 @@ defmodule LiteskillWeb.Plugs.Auth do
   def call(conn, :require_authenticated_user), do: require_authenticated_user(conn)
 
   def fetch_current_user(conn, _opts \\ []) do
-    case get_session(conn, :user_id) do
-      nil ->
-        assign(conn, :current_user, nil)
+    if SingleUser.enabled?() do
+      assign(conn, :current_user, SingleUser.auto_user())
+    else
+      case get_session(conn, :user_id) do
+        nil ->
+          assign(conn, :current_user, nil)
 
-      user_id ->
-        case Accounts.get_user(user_id) do
-          nil -> assign(conn, :current_user, nil)
-          user -> assign(conn, :current_user, user)
-        end
+        user_id ->
+          case Accounts.get_user(user_id) do
+            nil -> assign(conn, :current_user, nil)
+            user -> assign(conn, :current_user, user)
+          end
+      end
     end
   end
 
