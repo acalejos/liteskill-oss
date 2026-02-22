@@ -10,7 +10,7 @@ config :liteskill, LiteskillWeb.Endpoint, cache_static_manifest: "priv/static/ca
 # Force using SSL in production. Disable with FORCE_SSL=false for environments
 # where TLS is terminated externally without setting X-Forwarded-Proto.
 # Note `:force_ssl` is required to be set at compile-time.
-unless System.get_env("FORCE_SSL") == "false" do
+unless System.get_env("FORCE_SSL") == "false" or System.get_env("LITESKILL_DESKTOP") == "true" do
   config :liteskill, LiteskillWeb.Endpoint,
     force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true]
 end

@@ -2,7 +2,7 @@ defmodule Liteskill.McpServers do
   use Boundary,
     top_level?: true,
     deps: [Liteskill.Authorization, Liteskill.Rbac, Liteskill.BuiltinTools, Liteskill.Settings],
-    exports: [McpServer, Client]
+    exports: [McpServer, Client, UserToolSelection]
 
   @moduledoc """
   The McpServers context. Manages MCP server registrations per user.
@@ -10,6 +10,7 @@ defmodule Liteskill.McpServers do
 
   alias Liteskill.Authorization
   alias Liteskill.McpServers.McpServer
+  alias Liteskill.McpServers.UserToolSelection
   alias Liteskill.Repo
 
   import Ecto.Query
@@ -90,6 +91,70 @@ defmodule Liteskill.McpServers do
           Repo.delete(server)
         end
     end
+  end
+
+  # --- User tool selections ---
+
+  @doc """
+  Loads persisted server selections for the user, pruning any stale entries
+  that reference servers the user can no longer access.
+  """
+  def load_selected_server_ids(user_id) do
+    persisted =
+      UserToolSelection
+      |> where([s], s.user_id == ^user_id)
+      |> select([s], s.server_id)
+      |> Repo.all()
+      |> MapSet.new()
+
+    accessible =
+      list_servers(user_id)
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    valid = MapSet.intersection(persisted, accessible)
+    stale = MapSet.difference(persisted, accessible)
+
+    unless MapSet.size(stale) == 0 do
+      stale_list = MapSet.to_list(stale)
+
+      UserToolSelection
+      |> where([s], s.user_id == ^user_id and s.server_id in ^stale_list)
+      |> Repo.delete_all()
+    end
+
+    valid
+  end
+
+  @doc """
+  Persists a server selection for the user. Idempotent (on_conflict: :nothing).
+  """
+  def select_server(user_id, server_id) do
+    %UserToolSelection{}
+    |> UserToolSelection.changeset(%{user_id: user_id, server_id: server_id})
+    |> Repo.insert(on_conflict: :nothing)
+  end
+
+  @doc """
+  Removes a server selection for the user.
+  """
+  def deselect_server(user_id, server_id) do
+    UserToolSelection
+    |> where([s], s.user_id == ^user_id and s.server_id == ^server_id)
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  @doc """
+  Removes all server selections for the user.
+  """
+  def clear_selected_servers(user_id) do
+    UserToolSelection
+    |> where([s], s.user_id == ^user_id)
+    |> Repo.delete_all()
+
+    :ok
   end
 
   defp authorize_owner(entity, user_id), do: Authorization.authorize_owner(entity, user_id)

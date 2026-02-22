@@ -14,7 +14,11 @@ defmodule LiteskillWeb.Plugs.LiveAuth do
 
   def on_mount(:require_authenticated, _params, session, socket) do
     if SingleUser.enabled?() do
-      {:cont, assign(socket, :current_user, SingleUser.auto_user())}
+      if SingleUser.setup_needed?() do
+        {:halt, redirect(socket, to: "/setup")}
+      else
+        {:cont, assign(socket, :current_user, SingleUser.auto_user())}
+      end
     else
       case session["user_id"] do
         nil ->
@@ -38,7 +42,11 @@ defmodule LiteskillWeb.Plugs.LiveAuth do
 
   def on_mount(:require_admin, _params, session, socket) do
     if SingleUser.enabled?() do
-      {:cont, assign(socket, :current_user, SingleUser.auto_user())}
+      if SingleUser.setup_needed?() do
+        {:halt, redirect(socket, to: "/setup")}
+      else
+        {:cont, assign(socket, :current_user, SingleUser.auto_user())}
+      end
     else
       case session["user_id"] do
         nil ->
@@ -62,7 +70,11 @@ defmodule LiteskillWeb.Plugs.LiveAuth do
 
   def on_mount(:require_setup_needed, _params, _session, socket) do
     if SingleUser.enabled?() do
-      {:halt, redirect(socket, to: "/")}
+      if SingleUser.setup_needed?() do
+        {:cont, assign(socket, :current_user, SingleUser.auto_user())}
+      else
+        {:halt, redirect(socket, to: "/")}
+      end
     else
       admin = Accounts.get_user_by_email(User.admin_email())
 
@@ -76,7 +88,11 @@ defmodule LiteskillWeb.Plugs.LiveAuth do
 
   def on_mount(:redirect_if_authenticated, _params, session, socket) do
     if SingleUser.enabled?() do
-      {:halt, redirect(socket, to: "/")}
+      if SingleUser.setup_needed?() do
+        {:halt, redirect(socket, to: "/setup")}
+      else
+        {:halt, redirect(socket, to: "/")}
+      end
     else
       # If admin account needs setup, redirect to setup regardless of auth
       admin = Accounts.get_user_by_email(User.admin_email())

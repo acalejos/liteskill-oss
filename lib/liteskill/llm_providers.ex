@@ -241,6 +241,18 @@ defmodule Liteskill.LlmProviders do
     end
   end
 
+  @doc "Finds a provider by name and owner user_id."
+  def get_provider_by_name(name, user_id) do
+    Repo.get_by(LlmProvider, name: name, user_id: user_id)
+  end
+
+  @doc "Updates a provider record directly (no auth check — caller must authorize)."
+  def update_provider_record(%LlmProvider{} = provider, attrs) do
+    provider
+    |> LlmProvider.changeset(attrs)
+    |> Repo.update()
+  end
+
   # --- Private ---
 
   defp authorize_admin(user_id), do: Liteskill.Rbac.authorize(user_id, "llm_providers:manage")

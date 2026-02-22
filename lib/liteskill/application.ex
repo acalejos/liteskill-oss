@@ -14,6 +14,8 @@ defmodule Liteskill.Application do
     children =
       [
         LiteskillWeb.Telemetry,
+        # Desktop: start bundled PostgreSQL before Repo
+        if(desktop_mode?(), do: Liteskill.Desktop.PostgresManager),
         Liteskill.Repo,
         {DNSCluster, query: Application.get_env(:liteskill, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Liteskill.PubSub},
@@ -36,6 +38,8 @@ defmodule Liteskill.Application do
              end}
         ),
         # coveralls-ignore-stop
+        # OpenRouter OAuth PKCE state store (desktop mode cross-browser flow)
+        Liteskill.OpenRouter.StateStore,
         # Periodic sweep of stale rate limiter ETS buckets
         LiteskillWeb.Plugs.RateLimiter.Sweeper,
         # Task supervisor for LLM streaming and other async work
@@ -52,6 +56,8 @@ defmodule Liteskill.Application do
         # Schedule tick — checks for due schedules and enqueues runs
         # coveralls-ignore-start
         unless(test_env?(), do: Liteskill.Schedules.ScheduleTick),
+        # Desktop shutdown is handled by Tauri's kill_sidecar (SIGTERM/taskkill).
+        # No heartbeat socket or ShutdownManager needed.
         # coveralls-ignore-stop
         # Start to serve requests, typically the last entry
         LiteskillWeb.Endpoint
@@ -74,4 +80,5 @@ defmodule Liteskill.Application do
   end
 
   defp test_env?, do: Application.get_env(:liteskill, :env) == :test
+  defp desktop_mode?, do: Application.get_env(:liteskill, :desktop_mode, false)
 end

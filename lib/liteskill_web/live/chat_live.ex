@@ -29,6 +29,8 @@ defmodule LiteskillWeb.ChatLive do
       Liteskill.LlmModels.list_active_models(user.id, model_type: "inference")
 
     preferred_id = get_in(user.preferences, ["preferred_llm_model_id"])
+    selected_server_ids = McpServers.load_selected_server_ids(user.id)
+    auto_confirm_tools = get_in(user.preferences, ["auto_confirm_tools"]) != false
 
     selected_llm_model_id =
       cond do
@@ -68,9 +70,9 @@ defmodule LiteskillWeb.ChatLive do
        editing_mcp: nil,
        # Tool picker state
        available_tools: [],
-       selected_server_ids: MapSet.new(),
+       selected_server_ids: selected_server_ids,
        show_tool_picker: false,
-       auto_confirm_tools: true,
+       auto_confirm_tools: auto_confirm_tools,
        pending_tool_calls: [],
        tool_call_modal: nil,
        tools_loading: false,
@@ -150,7 +152,11 @@ defmodule LiteskillWeb.ChatLive do
      |> assign(PipelineLive.pipeline_assigns())
      |> assign(AgentStudioLive.studio_assigns())
      |> assign(AdminLive.admin_assigns())
-     |> assign(ProfileLive.profile_assigns()), layout: {LiteskillWeb.Layouts, :chat}}
+     |> assign(ProfileLive.profile_assigns())
+     |> then(fn socket ->
+       if MapSet.size(selected_server_ids) > 0, do: send(self(), :fetch_tools)
+       socket
+     end), layout: {LiteskillWeb.Layouts, :chat}}
   end
 
   @impl true
@@ -1140,6 +1146,7 @@ defmodule LiteskillWeb.ChatLive do
             live_action={@live_action}
             current_user={@current_user}
             sidebar_open={@sidebar_open}
+            single_user_mode={@single_user_mode}
             profile_users={@profile_users}
             profile_groups={@profile_groups}
             group_detail={@group_detail}
@@ -1162,6 +1169,7 @@ defmodule LiteskillWeb.ChatLive do
             role_users={@role_users}
             role_groups={@role_groups}
             role_user_search={@role_user_search}
+            setup_steps={@setup_steps}
             setup_step={@setup_step}
             setup_form={@setup_form}
             setup_error={@setup_error}
@@ -1171,6 +1179,13 @@ defmodule LiteskillWeb.ChatLive do
             setup_sources_to_configure={@setup_sources_to_configure}
             setup_current_config_index={@setup_current_config_index}
             setup_config_form={@setup_config_form}
+            setup_llm_providers={@setup_llm_providers}
+            setup_llm_models={@setup_llm_models}
+            setup_llm_provider_form={@setup_llm_provider_form}
+            setup_llm_model_form={@setup_llm_model_form}
+            setup_rag_embedding_models={@setup_rag_embedding_models}
+            setup_rag_current_model={@setup_rag_current_model}
+            setup_provider_view={@setup_provider_view}
             rag_embedding_models={@rag_embedding_models}
             rag_current_model={@rag_current_model}
             rag_stats={@rag_stats}
@@ -1225,6 +1240,7 @@ defmodule LiteskillWeb.ChatLive do
             role_users={@role_users}
             role_groups={@role_groups}
             role_user_search={@role_user_search}
+            setup_steps={@setup_steps}
             setup_step={@setup_step}
             setup_form={@setup_form}
             setup_error={@setup_error}
@@ -1234,6 +1250,13 @@ defmodule LiteskillWeb.ChatLive do
             setup_sources_to_configure={@setup_sources_to_configure}
             setup_current_config_index={@setup_current_config_index}
             setup_config_form={@setup_config_form}
+            setup_llm_providers={@setup_llm_providers}
+            setup_llm_models={@setup_llm_models}
+            setup_llm_provider_form={@setup_llm_provider_form}
+            setup_llm_model_form={@setup_llm_model_form}
+            setup_rag_embedding_models={@setup_rag_embedding_models}
+            setup_rag_current_model={@setup_rag_current_model}
+            setup_provider_view={@setup_provider_view}
             rag_embedding_models={@rag_embedding_models}
             rag_current_model={@rag_current_model}
             rag_stats={@rag_stats}
@@ -2728,12 +2751,15 @@ defmodule LiteskillWeb.ChatLive do
 
   @impl true
   def handle_event("toggle_server", %{"server-id" => server_id}, socket) do
+    user_id = socket.assigns.current_user.id
     selected = socket.assigns.selected_server_ids
 
     selected =
       if MapSet.member?(selected, server_id) do
+        McpServers.deselect_server(user_id, server_id)
         MapSet.delete(selected, server_id)
       else
+        McpServers.select_server(user_id, server_id)
         MapSet.put(selected, server_id)
       end
 
@@ -2742,11 +2768,15 @@ defmodule LiteskillWeb.ChatLive do
 
   @impl true
   def handle_event("toggle_auto_confirm", _params, socket) do
-    {:noreply, assign(socket, auto_confirm_tools: !socket.assigns.auto_confirm_tools)}
+    new_val = !socket.assigns.auto_confirm_tools
+    user = socket.assigns.current_user
+    Liteskill.Accounts.update_preferences(user, %{"auto_confirm_tools" => new_val})
+    {:noreply, assign(socket, auto_confirm_tools: new_val)}
   end
 
   @impl true
   def handle_event("clear_tools", _params, socket) do
+    McpServers.clear_selected_servers(socket.assigns.current_user.id)
     {:noreply, assign(socket, selected_server_ids: MapSet.new())}
   end
 
@@ -3051,6 +3081,11 @@ defmodule LiteskillWeb.ChatLive do
     assign_role_user remove_role_user assign_role_group remove_role_group
     setup_password setup_skip_password
     setup_toggle_permission setup_save_permissions setup_skip_permissions
+    setup_create_provider setup_providers_continue setup_providers_skip
+    setup_openrouter_connect
+    setup_providers_show_custom setup_providers_show_presets
+    setup_create_model setup_models_continue setup_models_skip
+    setup_select_embedding setup_rag_skip
     setup_toggle_source setup_save_sources
     setup_save_config setup_skip_config setup_skip_sources
     rag_select_model rag_cancel_change rag_confirm_input_change rag_confirm_model_change)
@@ -3071,6 +3106,14 @@ defmodule LiteskillWeb.ChatLive do
   # --- PubSub Handlers ---
 
   @impl true
+  def handle_info(:openrouter_connected, socket) do
+    {:noreply,
+     assign(socket,
+       setup_openrouter_pending: false,
+       setup_llm_providers: Liteskill.LlmProviders.list_all_providers()
+     )}
+  end
+
   def handle_info({:run_updated, _run} = msg, socket) do
     AgentStudioLive.handle_run_info(msg, socket)
   end

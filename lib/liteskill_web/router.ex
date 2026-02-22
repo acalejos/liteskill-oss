@@ -27,6 +27,10 @@ defmodule LiteskillWeb.Router do
 
     get "/session", SessionController, :create
     delete "/logout", SessionController, :delete
+
+    # OpenRouter OAuth PKCE flow (must be above OIDC wildcard routes)
+    get "/openrouter", OpenRouterController, :start
+    get "/openrouter/callback", OpenRouterController, :callback
   end
 
   # Public LiveView routes

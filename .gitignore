@@ -28,8 +28,10 @@ liteskill-*.tar
 # Ignore assets that are produced by build tools.
 /priv/static/assets/
 
-# Ignore digested assets cache.
+# Ignore digested assets cache and digest-stamped copies.
 /priv/static/cache_manifest.json
+/priv/static/**/*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+/priv/static/**/*.gz
 
 # In case you use Node.js/npm, you want to ignore these.
 npm-debug.log
@@ -46,4 +48,24 @@ npm-debug.log
 
 # claude
 .claude/
+
+# Bundled PostgreSQL binaries for desktop builds (fetched/built separately)
+/priv/postgres/
+
+# Burrito build output
+/burrito_out/
+
+# Tauri build artifacts
+/src-tauri/target/
+/src-tauri/node_modules/
+
+# Desktop build output (from mise linux-appimage)
+/dist/
+
+# erl crash dumps
+*.dump
+
+# appimage build artifacts
+*.AppImage*
+
 

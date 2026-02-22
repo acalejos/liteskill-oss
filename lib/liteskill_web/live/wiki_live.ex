@@ -38,7 +38,8 @@ defmodule LiteskillWeb.WikiLive do
        current_source: get_wiki_source(),
        source_documents: %{documents: [], page: 1, page_size: 20, total: 0, total_pages: 1},
        source_search: "",
-       has_admin_access: has_admin_access
+       has_admin_access: has_admin_access,
+       single_user_mode: Liteskill.SingleUser.enabled?()
      )
      |> allow_upload(:wiki_import, accept: ~w(.zip), max_entries: 1, max_file_size: 50_000_000)
      |> assign(SharingLive.sharing_assigns()), layout: {LiteskillWeb.Layouts, :chat}}
@@ -145,6 +146,7 @@ defmodule LiteskillWeb.WikiLive do
         active_conversation_id={nil}
         current_user={@current_user}
         has_admin_access={@has_admin_access}
+        single_user_mode={@single_user_mode}
       />
 
       <%!-- Main Area --%>

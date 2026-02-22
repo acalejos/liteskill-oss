@@ -4,6 +4,9 @@ defmodule Liteskill.SingleUserTest do
   alias Liteskill.SingleUser
   alias Liteskill.Accounts
   alias Liteskill.Accounts.User
+  alias Liteskill.LlmModels
+  alias Liteskill.LlmProviders
+  alias Liteskill.Settings
 
   describe "enabled?/0" do
     test "returns false by default" do
@@ -48,6 +51,117 @@ defmodule Liteskill.SingleUserTest do
 
       assert {:ok, same} = SingleUser.auto_provision_admin()
       assert same.id == admin.id
+    end
+  end
+
+  describe "setup_needed?/0" do
+    setup do
+      original = Application.get_env(:liteskill, :single_user_mode, false)
+
+      on_exit(fn ->
+        Application.put_env(:liteskill, :single_user_mode, original)
+      end)
+
+      admin = Accounts.ensure_admin_user()
+      {:ok, admin: admin}
+    end
+
+    test "returns false when single_user_mode is disabled", %{admin: _admin} do
+      Application.put_env(:liteskill, :single_user_mode, false)
+      refute SingleUser.setup_needed?()
+    end
+
+    test "returns true when enabled and no providers exist", %{admin: _admin} do
+      Application.put_env(:liteskill, :single_user_mode, true)
+      assert SingleUser.setup_needed?()
+    end
+
+    test "returns true when enabled and providers exist but no models", %{admin: admin} do
+      Application.put_env(:liteskill, :single_user_mode, true)
+
+      {:ok, _provider} =
+        LlmProviders.create_provider(%{
+          name: "Test Provider",
+          provider_type: "anthropic",
+          provider_config: %{},
+          user_id: admin.id
+        })
+
+      assert SingleUser.setup_needed?()
+    end
+
+    test "returns true when enabled and no embedding model selected", %{admin: admin} do
+      Application.put_env(:liteskill, :single_user_mode, true)
+
+      {:ok, provider} =
+        LlmProviders.create_provider(%{
+          name: "Test Provider",
+          provider_type: "anthropic",
+          provider_config: %{},
+          user_id: admin.id
+        })
+
+      {:ok, _model} =
+        LlmModels.create_model(%{
+          name: "Test Model",
+          model_id: "claude-3-5-sonnet-20241022",
+          provider_id: provider.id,
+          user_id: admin.id,
+          instance_wide: true
+        })
+
+      # No embedding model selected yet
+      assert SingleUser.setup_needed?()
+    end
+
+    test "returns false when all three configured", %{admin: admin} do
+      Application.put_env(:liteskill, :single_user_mode, true)
+
+      {:ok, provider} =
+        LlmProviders.create_provider(%{
+          name: "Test Provider",
+          provider_type: "anthropic",
+          provider_config: %{},
+          user_id: admin.id
+        })
+
+      {:ok, _model} =
+        LlmModels.create_model(%{
+          name: "Test Model",
+          model_id: "claude-3-5-sonnet-20241022",
+          provider_id: provider.id,
+          user_id: admin.id,
+          instance_wide: true
+        })
+
+      {:ok, embed_model} =
+        LlmModels.create_model(%{
+          name: "Embedding Model",
+          model_id: "amazon.titan-embed-text-v2:0",
+          model_type: "embedding",
+          provider_id: provider.id,
+          user_id: admin.id,
+          instance_wide: true
+        })
+
+      {:ok, _settings} = Settings.update_embedding_model(embed_model.id)
+
+      refute SingleUser.setup_needed?()
+
+      # Verify the individual conditions
+      assert LlmProviders.list_all_providers() != []
+      assert LlmModels.list_all_models() != []
+      assert Settings.embedding_enabled?()
+    end
+
+    test "returns false when setup has been dismissed", %{admin: _admin} do
+      Application.put_env(:liteskill, :single_user_mode, true)
+
+      # No providers/models/embedding, but setup was dismissed
+      assert LlmProviders.list_all_providers() == []
+      {:ok, _} = Settings.dismiss_setup()
+
+      refute SingleUser.setup_needed?()
     end
   end
 end

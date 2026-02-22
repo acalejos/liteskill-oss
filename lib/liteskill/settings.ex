@@ -44,6 +44,14 @@ defmodule Liteskill.Settings do
     get().allow_private_mcp_urls || false
   end
 
+  def setup_dismissed? do
+    get().setup_dismissed || false
+  end
+
+  def dismiss_setup do
+    update(%{setup_dismissed: true})
+  end
+
   def update_embedding_model(model_id) do
     update(%{embedding_model_id: model_id})
   end

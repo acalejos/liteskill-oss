@@ -12,6 +12,10 @@ mix test test/path_test.exs  # Run a single test file
 mix test --failed            # Re-run previously failed tests
 mix ecto.reset               # Drop + create + migrate + seed
 mix phx.server               # Start dev server on localhost:4000
+
+# Docker-based (no local Postgres needed)
+./scripts/test-with-docker.sh test        # Run tests via Docker Postgres
+./scripts/test-with-docker.sh precommit   # Full precommit via Docker
 ```
 
 Always run `mix precommit` after completing changes.

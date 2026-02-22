@@ -1,0 +1,61 @@
+## Desktop build toolchain image.
+## Contains all system dependencies and compilers needed to build the desktop app.
+## The project directory is mounted at runtime (not copied into the image).
+##
+## Usage:
+##   docker build -f scripts/Dockerfile.desktop-build -t liteskill-desktop-build .
+##   docker run --rm -v "$(pwd):/build" liteskill-desktop-build \
+##       bash scripts/build-desktop.sh x86_64-unknown-linux-gnu
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV MIX_ENV=prod
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# -- System deps --------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git build-essential \
+    libwebkit2gtk-4.1-dev librsvg2-dev patchelf \
+    libssl-dev libgtk-3-dev libayatana-appindicator3-dev \
+    file xz-utils unzip pkg-config wget \
+    libncurses-dev bison flex libreadline-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# -- Erlang OTP + Elixir (compiled from source) -------------------------------
+COPY scripts/setup-erlang-elixir.sh /tmp/setup-erlang-elixir.sh
+RUN bash /tmp/setup-erlang-elixir.sh && rm /tmp/setup-erlang-elixir.sh
+
+# -- Node.js 24 ---------------------------------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# -- Rust stable + tauri-cli ---------------------------------------------------
+# Install to /opt/rust so non-root UIDs (via docker run -u) can access it.
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV CARGO_HOME=/opt/rust/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && chmod -R a+rX /opt/rust
+ENV PATH="/opt/rust/cargo/bin:${PATH}"
+RUN cargo install tauri-cli \
+    && chmod -R a+rX /opt/rust
+
+# -- Zig 0.15.2 (required by Burrito) -----------------------------------------
+RUN curl -fsSL "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz" \
+    -o /tmp/zig.tar.xz \
+    && tar xf /tmp/zig.tar.xz -C /opt \
+    && ln -s /opt/zig-x86_64-linux-0.15.2/zig /usr/local/bin/zig \
+    && rm /tmp/zig.tar.xz
+
+# Verify tool versions
+RUN echo "=== Tool versions ===" && \
+    elixir --version && \
+    node --version && \
+    rustc --version && \
+    cargo tauri --version && \
+    zig version && \
+    echo "=== All tools ready ==="
+
+# -- Mount point for project source -------------------------------------------
+WORKDIR /build

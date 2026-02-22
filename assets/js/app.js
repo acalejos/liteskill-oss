@@ -30,6 +30,24 @@ const Hooks = {
   SectionEditor,
   WikiEditor,
 
+  OpenExternalUrl: {
+    mounted() {
+      this.handleEvent("open_external_url", ({ url }) => {
+        // In Tauri desktop, open in system browser via shell:open plugin.
+        // __TAURI_INTERNALS__ is injected by Tauri into all webview pages.
+        if (window.__TAURI_INTERNALS__) {
+          window.__TAURI_INTERNALS__.invoke('plugin:shell|open', { path: url })
+            .catch((err) => {
+              console.error('Tauri shell:open failed, falling back to webview navigation:', err)
+              window.location.href = url
+            })
+        } else {
+          window.location.href = url
+        }
+      })
+    }
+  },
+
   SidebarNav: {
     mounted() {
       this.handleEvent("nav", () => {

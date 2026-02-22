@@ -134,6 +134,35 @@ defmodule Liteskill.SettingsTest do
     end
   end
 
+  describe "setup_dismissed?/0" do
+    test "returns false by default" do
+      assert Settings.setup_dismissed?() == false
+    end
+
+    test "returns true after dismiss_setup" do
+      Settings.get()
+      {:ok, _} = Settings.dismiss_setup()
+
+      assert Settings.setup_dismissed?() == true
+    end
+  end
+
+  describe "dismiss_setup/0" do
+    test "sets setup_dismissed to true" do
+      Settings.get()
+
+      assert {:ok, settings} = Settings.dismiss_setup()
+      assert settings.setup_dismissed == true
+    end
+
+    test "reflects on subsequent get" do
+      Settings.get()
+      {:ok, _} = Settings.dismiss_setup()
+
+      assert Settings.get().setup_dismissed == true
+    end
+  end
+
   describe "bust_cache/0" do
     test "erases persistent_term entry" do
       # In test mode, cache is disabled, but bust_cache should not crash

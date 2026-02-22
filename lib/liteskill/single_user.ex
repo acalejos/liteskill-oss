@@ -8,10 +8,25 @@ defmodule Liteskill.SingleUser do
 
   alias Liteskill.Accounts
   alias Liteskill.Accounts.User
+  alias Liteskill.LlmModels
+  alias Liteskill.LlmProviders
+  alias Liteskill.Settings
 
   @doc "Returns true when single-user mode is enabled via config."
   def enabled? do
     Application.get_env(:liteskill, :single_user_mode, false)
+  end
+
+  @doc """
+  Returns true when single-user mode is enabled AND setup has not been dismissed
+  AND any of: no providers, no models, or no embedding model selected.
+  """
+  def setup_needed? do
+    enabled?() and
+      not Settings.setup_dismissed?() and
+      (LlmProviders.list_all_providers() == [] or
+         LlmModels.list_all_models() == [] or
+         not Settings.embedding_enabled?())
   end
 
   @doc "Returns the admin user, or nil if not yet provisioned."
