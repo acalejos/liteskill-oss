@@ -147,6 +147,9 @@ defmodule Liteskill.MixProject do
 
   defp releases do
     [
+      liteskill: [
+        steps: [:assemble]
+      ],
       desktop: [
         steps: [:assemble, &Burrito.wrap/1],
         burrito: [
