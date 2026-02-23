@@ -265,6 +265,19 @@ defmodule Liteskill.GroupsTest do
     end
   end
 
+  describe "admin_get_group_by_name/1" do
+    test "returns group by name", %{creator: creator} do
+      {:ok, group} = Groups.create_group("Findable Group", creator.id)
+
+      found = Groups.admin_get_group_by_name("Findable Group")
+      assert found.id == group.id
+    end
+
+    test "returns nil for nonexistent name" do
+      assert is_nil(Groups.admin_get_group_by_name("Nonexistent"))
+    end
+  end
+
   describe "admin_delete_group/1" do
     test "deletes group without creator check", %{creator: creator} do
       {:ok, group} = Groups.create_group("Admin Delete", creator.id)

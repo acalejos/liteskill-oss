@@ -1,4 +1,17 @@
 defmodule Liteskill.LLM do
+  use Boundary,
+    top_level?: true,
+    deps: [
+      Liteskill.Chat,
+      Liteskill.Aggregate,
+      Liteskill.EventStore,
+      Liteskill.Usage,
+      Liteskill.LlmModels,
+      Liteskill.LlmGateway,
+      Liteskill.McpServers
+    ],
+    exports: [StreamHandler, ToolUtils, RagContext]
+
   @moduledoc """
   Public API for LLM interactions.
 
@@ -11,6 +24,7 @@ defmodule Liteskill.LLM do
   """
 
   alias Liteskill.LLM.StreamHandler
+  alias Liteskill.Usage
 
   @doc """
   Sends a non-streaming completion request.
@@ -67,6 +81,7 @@ defmodule Liteskill.LLM do
     case generate_fn.(model, context, req_opts) do
       {:ok, response} ->
         text = ReqLLM.Response.text(response) || ""
+        maybe_record_complete_usage(response, model, opts)
 
         {:ok,
          %{"output" => %{"message" => %{"role" => "assistant", "content" => [%{"text" => text}]}}}}
@@ -82,6 +97,19 @@ defmodule Liteskill.LLM do
   end
 
   # coveralls-ignore-stop
+
+  defp maybe_record_complete_usage(response, model, opts) do
+    usage = ReqLLM.Response.usage(response) || %{}
+    model_id = if is_map(model), do: model[:id], else: to_string(model)
+
+    Usage.record_from_response(usage,
+      user_id: Keyword.get(opts, :user_id),
+      llm_model: Keyword.get(opts, :llm_model),
+      model_id: model_id || "unknown",
+      conversation_id: Keyword.get(opts, :conversation_id),
+      call_type: "complete"
+    )
+  end
 
   @doc """
   Returns active LLM models available to the given user (DB-only).

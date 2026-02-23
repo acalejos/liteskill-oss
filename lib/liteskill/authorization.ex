@@ -1,4 +1,6 @@
 defmodule Liteskill.Authorization do
+  use Boundary, top_level?: true, deps: [Liteskill.Groups], exports: [EntityAcl, Roles]
+
   @moduledoc """
   Centralized authorization context for all entity types.
 
@@ -77,7 +79,7 @@ defmodule Liteskill.Authorization do
   end
 
   @doc "Returns true if user has owner role."
-  def is_owner?(entity_type, entity_id, user_id) do
+  def owner?(entity_type, entity_id, user_id) do
     case get_role(entity_type, entity_id, user_id) do
       {:ok, "owner"} -> true
       _ -> false
@@ -223,6 +225,25 @@ defmodule Liteskill.Authorization do
     |> Repo.all()
   end
 
+  @doc """
+  Returns true if the user has non-owner access to the entity.
+  Excludes "owner" role — only direct ACL (viewer/editor/manager) or group-based ACL.
+  Used for usage/inference checks where ownership alone shouldn't grant access.
+  """
+  def has_usage_access?(entity_type, entity_id, user_id) do
+    Repo.exists?(
+      from(a in EntityAcl,
+        left_join: gm in GroupMembership,
+        on: gm.group_id == a.group_id and gm.user_id == ^user_id,
+        where:
+          a.entity_type == ^entity_type and
+            a.entity_id == ^entity_id and
+            a.role != "owner" and
+            (a.user_id == ^user_id or not is_nil(gm.id))
+      )
+    )
+  end
+
   # --- Query Helpers ---
 
   @doc """
@@ -247,35 +268,137 @@ defmodule Liteskill.Authorization do
     from(e in subquery(union_all(direct, ^group)), select: e.entity_id)
   end
 
-  # --- Ownership Verification ---
+  @doc """
+  Like `accessible_entity_ids/2` but excludes "owner" role from direct ACLs.
+  Used for usage/inference filtering where ownership alone shouldn't grant access.
+  """
+  def usage_accessible_entity_ids(entity_type, user_id) do
+    direct =
+      from(a in EntityAcl,
+        where: a.entity_type == ^entity_type and a.user_id == ^user_id and a.role != "owner",
+        select: a.entity_id
+      )
 
-  @schema_map %{
-    "conversation" => Liteskill.Chat.Conversation,
-    "mcp_server" => Liteskill.McpServers.McpServer,
-    "data_source" => Liteskill.DataSources.Source,
-    "wiki_space" => Liteskill.DataSources.Document,
-    "llm_model" => Liteskill.LlmModels.LlmModel,
-    "llm_provider" => Liteskill.LlmProviders.LlmProvider
-  }
+    group =
+      from(a in EntityAcl,
+        join: gm in GroupMembership,
+        on: gm.group_id == a.group_id and gm.user_id == ^user_id,
+        where: a.entity_type == ^entity_type and not is_nil(a.group_id) and a.role != "owner",
+        select: a.entity_id
+      )
+
+    from(e in subquery(union_all(direct, ^group)), select: e.entity_id)
+  end
+
+  # --- Struct-Level Ownership Check ---
+
+  @doc """
+  Checks if the given struct is owned by `user_id` (via its `:user_id` field).
+  Returns `{:ok, entity}` if owned, `{:error, :forbidden}` otherwise.
+
+  Use this in context modules to avoid duplicating authorize_owner/2.
+  """
+  def authorize_owner(%{user_id: owner_id} = entity, owner_id), do: {:ok, entity}
+  def authorize_owner(%{user_id: _}, _user_id), do: {:error, :forbidden}
+
+  # --- Transactional Create with Owner ACL ---
+
+  @doc """
+  Inserts a changeset inside a transaction, creates an owner ACL for the
+  resulting entity, and preloads the given associations.
+
+  Designed to be used in a pipe: `changeset |> create_with_owner_acl(entity_type, preloads)`.
+
+  Returns `{:ok, entity}` or `{:error, changeset}`.
+
+  ## Example
+
+      changeset |> Authorization.create_with_owner_acl("agent_definition", [:llm_model])
+  """
+  def create_with_owner_acl(changeset, entity_type, preloads \\ []) do
+    Repo.transaction(fn ->
+      case Repo.insert(changeset) do
+        {:ok, entity} ->
+          {:ok, _} = create_owner_acl(entity_type, entity.id, entity.user_id)
+          Repo.preload(entity, preloads)
+
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
+    end)
+  end
+
+  # --- Ownership Verification ---
 
   @doc """
   Verifies that the user owns the given entity by checking the `user_id` field.
+  The caller provides the Ecto schema module to query.
   Returns `:ok` if user owns it, `:error` otherwise.
   """
-  def verify_ownership(entity_type, entity_id, user_id) do
-    case Map.get(@schema_map, entity_type) do
-      nil ->
-        :error
-
-      schema ->
-        case Repo.get(schema, entity_id) do
-          %{user_id: ^user_id} -> :ok
-          _ -> :error
-        end
+  def verify_ownership(schema, entity_id, user_id) when is_atom(schema) do
+    case Repo.get(schema, entity_id) do
+      %{user_id: ^user_id} -> :ok
+      _ -> :error
     end
   end
 
+  # --- Agent Grantee Functions ---
+
+  @doc """
+  Grants an agent definition access to an entity (e.g. MCP server, data source).
+  No grantor permission check — called by the agent owner during configuration.
+  """
+  def grant_agent_access(entity_type, entity_id, agent_definition_id, role \\ "viewer") do
+    %EntityAcl{}
+    |> EntityAcl.changeset(%{
+      entity_type: entity_type,
+      entity_id: entity_id,
+      agent_definition_id: agent_definition_id,
+      role: role
+    })
+    |> Repo.insert()
+  end
+
+  @doc "Revokes an agent's access to an entity."
+  def revoke_agent_access(entity_type, entity_id, agent_definition_id) do
+    case get_agent_acl(entity_type, entity_id, agent_definition_id) do
+      nil -> {:error, :not_found}
+      acl -> Repo.delete(acl)
+    end
+  end
+
+  @doc """
+  Returns a subquery of entity IDs the agent definition can access for the given type.
+  Used by ToolResolver and RAG integration to filter resources by agent ACLs.
+  """
+  def agent_accessible_entity_ids(entity_type, agent_definition_id) do
+    from(a in EntityAcl,
+      where: a.entity_type == ^entity_type and a.agent_definition_id == ^agent_definition_id,
+      select: a.entity_id
+    )
+  end
+
+  @doc "Lists all ACLs granted to a specific agent definition for a given entity type."
+  def list_agent_acls(entity_type, agent_definition_id) do
+    from(a in EntityAcl,
+      where: a.entity_type == ^entity_type and a.agent_definition_id == ^agent_definition_id,
+      order_by: [asc: a.inserted_at]
+    )
+    |> Repo.all()
+  end
+
   # --- Private Helpers ---
+
+  defp get_agent_acl(entity_type, entity_id, agent_definition_id) do
+    Repo.one(
+      from(a in EntityAcl,
+        where:
+          a.entity_type == ^entity_type and
+            a.entity_id == ^entity_id and
+            a.agent_definition_id == ^agent_definition_id
+      )
+    )
+  end
 
   defp get_user_acl(entity_type, entity_id, user_id) do
     Repo.one(

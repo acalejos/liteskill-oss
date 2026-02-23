@@ -1,10 +1,16 @@
 defmodule Liteskill.McpServers do
+  use Boundary,
+    top_level?: true,
+    deps: [Liteskill.Authorization, Liteskill.Rbac, Liteskill.BuiltinTools, Liteskill.Settings],
+    exports: [McpServer, Client, UserToolSelection]
+
   @moduledoc """
   The McpServers context. Manages MCP server registrations per user.
   """
 
   alias Liteskill.Authorization
   alias Liteskill.McpServers.McpServer
+  alias Liteskill.McpServers.UserToolSelection
   alias Liteskill.Repo
 
   import Ecto.Query
@@ -49,24 +55,28 @@ defmodule Liteskill.McpServers do
   end
 
   def create_server(attrs) do
-    Repo.transaction(fn ->
-      case %McpServer{}
-           |> McpServer.changeset(attrs)
-           |> Repo.insert() do
-        {:ok, server} ->
-          {:ok, _} = Authorization.create_owner_acl("mcp_server", server.id, server.user_id)
-          server
+    user_id = attrs[:user_id] || attrs["user_id"]
 
-        {:error, changeset} ->
-          Repo.rollback(changeset)
-      end
-    end)
+    with :ok <- Liteskill.Rbac.authorize(user_id, "mcp_servers:create") do
+      Repo.transaction(fn ->
+        case %McpServer{}
+             |> McpServer.changeset(attrs, url_validation_opts())
+             |> Repo.insert() do
+          {:ok, server} ->
+            {:ok, _} = Authorization.create_owner_acl("mcp_server", server.id, server.user_id)
+            server
+
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
+      end)
+    end
   end
 
   def update_server(server, user_id, attrs) do
     with {:ok, server} <- authorize_owner(server, user_id) do
       server
-      |> McpServer.changeset(attrs)
+      |> McpServer.changeset(attrs, url_validation_opts())
       |> Repo.update()
     end
   end
@@ -83,6 +93,73 @@ defmodule Liteskill.McpServers do
     end
   end
 
-  defp authorize_owner(%McpServer{user_id: user_id} = server, user_id), do: {:ok, server}
-  defp authorize_owner(_, _), do: {:error, :forbidden}
+  # --- User tool selections ---
+
+  @doc """
+  Loads persisted server selections for the user, pruning any stale entries
+  that reference servers the user can no longer access.
+  """
+  def load_selected_server_ids(user_id) do
+    persisted =
+      UserToolSelection
+      |> where([s], s.user_id == ^user_id)
+      |> select([s], s.server_id)
+      |> Repo.all()
+      |> MapSet.new()
+
+    accessible =
+      list_servers(user_id)
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    valid = MapSet.intersection(persisted, accessible)
+    stale = MapSet.difference(persisted, accessible)
+
+    unless MapSet.size(stale) == 0 do
+      stale_list = MapSet.to_list(stale)
+
+      UserToolSelection
+      |> where([s], s.user_id == ^user_id and s.server_id in ^stale_list)
+      |> Repo.delete_all()
+    end
+
+    valid
+  end
+
+  @doc """
+  Persists a server selection for the user. Idempotent (on_conflict: :nothing).
+  """
+  def select_server(user_id, server_id) do
+    %UserToolSelection{}
+    |> UserToolSelection.changeset(%{user_id: user_id, server_id: server_id})
+    |> Repo.insert(on_conflict: :nothing)
+  end
+
+  @doc """
+  Removes a server selection for the user.
+  """
+  def deselect_server(user_id, server_id) do
+    UserToolSelection
+    |> where([s], s.user_id == ^user_id and s.server_id == ^server_id)
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  @doc """
+  Removes all server selections for the user.
+  """
+  def clear_selected_servers(user_id) do
+    UserToolSelection
+    |> where([s], s.user_id == ^user_id)
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  defp authorize_owner(entity, user_id), do: Authorization.authorize_owner(entity, user_id)
+
+  defp url_validation_opts do
+    [allow_private_urls: Liteskill.Settings.allow_private_mcp_urls?()]
+  end
 end

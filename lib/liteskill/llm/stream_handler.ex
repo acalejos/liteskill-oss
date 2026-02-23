@@ -4,7 +4,8 @@ defmodule Liteskill.LLM.StreamHandler do
 
   Uses ReqLLM for LLM transport. Appends AssistantStreamStarted, fires
   AssistantChunkReceived per text chunk, then AssistantStreamCompleted or
-  AssistantStreamFailed. Includes retry with exponential backoff for 429/503.
+  AssistantStreamFailed. Includes retry with exponential backoff for transient
+  errors (429/503/408, timeouts, transport errors).
 
   Supports tool calling: when the LLM returns tool_use, records ToolCallStarted
   events. In auto-confirm mode, executes tools via MCP client and continues the
@@ -14,12 +15,13 @@ defmodule Liteskill.LLM.StreamHandler do
 
   alias Liteskill.Aggregate.Loader
   alias Liteskill.Chat.{ConversationAggregate, Projector}
-  alias Liteskill.McpServers.Client, as: McpClient
+  alias Liteskill.LlmGateway.{ProviderGate, TokenBucket}
+  alias Liteskill.LLM.ToolUtils
+  alias Liteskill.Usage
 
   require Logger
 
   @max_retries 3
-  @max_tool_rounds 10
   @default_backoff_ms 1000
   @tool_approval_timeout_ms 300_000
 
@@ -37,22 +39,146 @@ defmodule Liteskill.LLM.StreamHandler do
     * `:auto_confirm` - Boolean, auto-execute tool calls (default false)
     * `:backoff_ms` - Base backoff for retries
     * `:tool_approval_timeout_ms` - Timeout for manual tool approval (default 300_000)
-    * `:max_tool_rounds` - Max consecutive tool-calling rounds (default 10)
     * `:stream_fn` - Override the LLM streaming function (for testing)
   """
   def handle_stream(stream_id, messages, opts \\ []) do
-    tool_round = Keyword.get(opts, :tool_round, 0)
-    max_rounds = Keyword.get(opts, :max_tool_rounds, @max_tool_rounds)
-
-    if tool_round >= max_rounds do
-      Logger.warning("StreamHandler: max tool rounds (#{max_rounds}) exceeded for #{stream_id}")
-      {:error, :max_tool_rounds_exceeded}
-    else
-      do_handle_stream(stream_id, messages, opts)
-    end
+    do_handle_stream(stream_id, messages, opts)
   end
 
   defp do_handle_stream(stream_id, messages, opts) do
+    cost_limit = Keyword.get(opts, :cost_limit)
+    conversation_id = Keyword.get(opts, :conversation_id)
+
+    with :ok <- check_cost_limit(cost_limit, conversation_id),
+         {:ok, opts} <- check_gateway(opts) do
+      do_start_stream(stream_id, messages, opts)
+    else
+      {:error, reason} = error ->
+        Logger.warning(
+          "StreamHandler: pre-flight check failed for #{stream_id}: #{inspect(reason)}"
+        )
+
+        error
+    end
+  end
+
+  defp check_cost_limit(nil, _), do: :ok
+  defp check_cost_limit(_, nil), do: :ok
+
+  defp check_cost_limit(cost_limit, conversation_id) do
+    case Usage.check_cost_limit(:conversation, conversation_id, cost_limit) do
+      :ok ->
+        :ok
+
+      {:error, :cost_limit_exceeded, current} ->
+        {:error,
+         {"cost_limit",
+          "Cost limit of $#{cost_limit} reached (spent: $#{Decimal.round(current, 4)})"}}
+    end
+  end
+
+  # coveralls-ignore-start — gateway integration tested at ProviderGate/TokenBucket level
+  defp check_gateway(opts) do
+    if Keyword.get(opts, :skip_gateway, false) do
+      {:ok, opts}
+    else
+      with :ok <- check_token_bucket(opts),
+           {:ok, gate_opts} <- check_provider_gate(opts) do
+        {:ok, Keyword.merge(opts, gate_opts)}
+      end
+    end
+  end
+
+  defp check_token_bucket(opts) do
+    user_id = Keyword.get(opts, :user_id)
+    llm_model = Keyword.get(opts, :llm_model)
+    model_id = if llm_model, do: llm_model.model_id, else: Keyword.get(opts, :model_id)
+
+    if user_id && model_id do
+      case TokenBucket.check_rate(user_id, model_id) do
+        :ok ->
+          :ok
+
+        {:error, :rate_limited, _ms} ->
+          {:error, {"rate_limited", "Too many requests — try again shortly"}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp check_provider_gate(opts) do
+    provider_id = extract_provider_id(opts)
+
+    if provider_id do
+      case ProviderGate.checkout(provider_id) do
+        {:ok, ref} ->
+          {:ok, [gateway_provider_id: provider_id, gateway_checkout_ref: ref]}
+
+        {:error, :gateway_not_available} ->
+          {:ok, []}
+
+        {:error, :circuit_open, _ms} ->
+          {:error, {"circuit_open", "LLM provider temporarily unavailable — try again shortly"}}
+
+        {:error, :retry_after, _ms} ->
+          {:error, {"rate_limited", "LLM provider rate limit — try again shortly"}}
+
+        {:error, :concurrency_limit} ->
+          {:error, {"concurrency_limit", "Too many concurrent requests — try again shortly"}}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  defp check_context_size(messages, %{context_window: cw})
+       when is_integer(cw) and cw > 0 do
+    estimated_bytes =
+      messages
+      |> Enum.reduce(0, fn msg, acc ->
+        content = msg[:content] || msg["content"] || ""
+        acc + content_byte_size(content)
+      end)
+
+    estimated_tokens = div(estimated_bytes, 4)
+
+    if estimated_tokens > cw * 0.95 do
+      {:error,
+       {"context_too_large",
+        "Estimated #{estimated_tokens} tokens exceeds #{trunc(cw * 0.95)} token limit (95% of #{cw} context window)"}}
+    else
+      :ok
+    end
+  end
+
+  defp check_context_size(_messages, _llm_model), do: :ok
+
+  defp content_byte_size(content) when is_binary(content), do: byte_size(content)
+  defp content_byte_size(content) when is_list(content), do: byte_size(Jason.encode!(content))
+  defp content_byte_size(content) when is_map(content), do: byte_size(Jason.encode!(content))
+  defp content_byte_size(_), do: 0
+
+  defp extract_provider_id(opts) do
+    case Keyword.get(opts, :llm_model) do
+      %{provider_id: pid} when is_binary(pid) -> pid
+      %{provider: %{id: pid}} when is_binary(pid) -> pid
+      _ -> nil
+    end
+  end
+
+  defp gateway_checkin(opts, result) do
+    provider_id = Keyword.get(opts, :gateway_provider_id)
+    ref = Keyword.get(opts, :gateway_checkout_ref)
+
+    if provider_id && ref do
+      ProviderGate.checkin(provider_id, ref, result)
+    end
+  end
+
+  # coveralls-ignore-stop
+
+  defp do_start_stream(stream_id, messages, opts) do
     llm_model = Keyword.get(opts, :llm_model)
 
     model_id =
@@ -62,20 +188,23 @@ defmodule Liteskill.LLM.StreamHandler do
         true -> raise "No model specified: pass :llm_model or :model_id option"
       end
 
-    message_id = Ecto.UUID.generate()
-    rag_sources = Keyword.get(opts, :rag_sources)
+    # Pre-flight context size check (only when context_window is configured)
+    with :ok <- check_context_size(messages, llm_model) do
+      message_id = Ecto.UUID.generate()
+      rag_sources = Keyword.get(opts, :rag_sources)
 
-    command =
-      {:start_assistant_stream,
-       %{message_id: message_id, model_id: model_id, rag_sources: rag_sources}}
+      command =
+        {:start_assistant_stream,
+         %{message_id: message_id, model_id: model_id, rag_sources: rag_sources}}
 
-    case Loader.execute(ConversationAggregate, stream_id, command) do
-      {:ok, _state, events} ->
-        Projector.project_events(stream_id, events)
-        do_stream(stream_id, message_id, model_id, messages, opts)
+      case Loader.execute(ConversationAggregate, stream_id, command) do
+        {:ok, _state, events} ->
+          Projector.project_events(stream_id, events)
+          do_stream(stream_id, message_id, model_id, messages, opts)
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -83,8 +212,10 @@ defmodule Liteskill.LLM.StreamHandler do
     do_stream_with_retry(stream_id, message_id, model_id, messages, opts, 0)
   end
 
-  defp do_stream_with_retry(stream_id, message_id, _model_id, _messages, _opts, retry_count)
+  defp do_stream_with_retry(stream_id, message_id, _model_id, _messages, opts, retry_count)
        when retry_count >= @max_retries do
+    gateway_checkin(opts, {:error, :retryable, @default_backoff_ms})
+
     fail_stream(
       stream_id,
       message_id,
@@ -123,6 +254,27 @@ defmodule Liteskill.LLM.StreamHandler do
     call_opts = build_call_opts(opts)
 
     case stream_fn.(model_id, messages, on_text_chunk, call_opts) do
+      {:ok, full_content, tool_calls, usage} ->
+        latency_ms = System.monotonic_time(:millisecond) - start_time
+
+        if tool_calls != [] do
+          # coveralls-ignore-start
+          handle_tool_calls(
+            stream_id,
+            message_id,
+            messages,
+            full_content,
+            tool_calls,
+            latency_ms,
+            usage,
+            opts
+          )
+
+          # coveralls-ignore-stop
+        else
+          complete_stream(stream_id, message_id, full_content, latency_ms, usage, opts)
+        end
+
       {:ok, full_content, tool_calls} ->
         latency_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -134,26 +286,62 @@ defmodule Liteskill.LLM.StreamHandler do
             full_content,
             tool_calls,
             latency_ms,
+            nil,
             opts
           )
         else
-          complete_stream(stream_id, message_id, full_content, latency_ms)
+          complete_stream(stream_id, message_id, full_content, latency_ms, nil, opts)
         end
 
-      {:error, %{status: status}} when status in [429, 503] ->
-        base_backoff = Keyword.get(opts, :backoff_ms, @default_backoff_ms)
-        jitter = :rand.uniform()
-        backoff = trunc(base_backoff * Integer.pow(2, retry_count) * (1 + jitter))
-
-        Logger.warning("Bedrock #{status}, retrying in #{backoff}ms (attempt #{retry_count + 1})")
-
-        Process.sleep(backoff)
-        do_stream_with_retry(stream_id, message_id, model_id, messages, opts, retry_count + 1)
-
       {:error, reason} ->
-        error_message = extract_error_message(reason)
-        Logger.warning("StreamHandler: LLM request failed for #{stream_id}: #{error_message}")
-        fail_stream(stream_id, message_id, "request_error", error_message, retry_count)
+        if retryable_error?(reason) do
+          label = retryable_error_label(reason)
+          base_backoff = Keyword.get(opts, :backoff_ms, @default_backoff_ms)
+
+          # Use longer backoff for 429 rate-limit errors
+          base_backoff =
+            if match?(%{status: 429}, reason), do: base_backoff * 3, else: base_backoff
+
+          jitter = :rand.uniform()
+          backoff = trunc(base_backoff * Integer.pow(2, retry_count) * (1 + jitter))
+
+          :telemetry.execute(
+            [:liteskill, :llm, :retry],
+            %{count: 1, backoff_ms: backoff},
+            %{stream_id: stream_id, attempt: retry_count + 1, error_label: label}
+          )
+
+          Logger.warning(
+            "StreamHandler #{label}, retrying in #{backoff}ms (attempt #{retry_count + 1})"
+          )
+
+          # Interruptible sleep — responds to cancel during backoff
+          # coveralls-ignore-start — cancel path untestable without race
+          receive do
+            :cancel -> :cancelled
+          after
+            backoff -> :ok
+          end
+
+          # coveralls-ignore-stop
+          # Clean up orphaned chunks from the failed attempt
+          Liteskill.Chat.delete_message_chunks(message_id)
+
+          do_stream_with_retry(stream_id, message_id, model_id, messages, opts, retry_count + 1)
+        else
+          error_message = extract_error_message(reason)
+
+          :telemetry.execute(
+            [:liteskill, :llm, :call_failed],
+            %{count: 1},
+            %{stream_id: stream_id, error_message: error_message}
+          )
+
+          Logger.warning("StreamHandler: LLM request failed for #{stream_id}: #{error_message}")
+
+          gateway_checkin(opts, {:error, :non_retryable})
+          fail_stream(stream_id, message_id, "request_error", error_message, retry_count)
+        end
     end
   end
 
@@ -174,7 +362,8 @@ defmodule Liteskill.LLM.StreamHandler do
             text = ReqLLM.Response.text(response) || ""
             raw_tool_calls = ReqLLM.Response.tool_calls(response) || []
             tool_calls = Enum.map(raw_tool_calls, &normalize_tool_call/1)
-            {:ok, text, tool_calls}
+            usage = ReqLLM.Response.usage(response)
+            {:ok, text, tool_calls, usage}
 
           {:error, reason} ->
             {:error, normalize_error(reason)}
@@ -276,7 +465,7 @@ defmodule Liteskill.LLM.StreamHandler do
     req_opts =
       case llm_model do
         nil ->
-          [provider_options: bedrock_provider_options()]
+          [provider_options: []]
 
         llm_model ->
           {model_spec, model_opts} = Liteskill.LlmModels.build_provider_options(llm_model)
@@ -297,8 +486,23 @@ defmodule Liteskill.LLM.StreamHandler do
 
     req_opts =
       case Keyword.get(opts, :max_tokens) do
-        nil -> req_opts
-        max -> Keyword.put(req_opts, :max_tokens, max)
+        nil ->
+          # Default to model's max_output_tokens if configured
+          llm_model = Keyword.get(opts, :llm_model)
+
+          # coveralls-ignore-start — requires LlmModel with max_output_tokens set
+          case llm_model do
+            %{max_output_tokens: max} when is_integer(max) ->
+              Keyword.put(req_opts, :max_tokens, max)
+
+            _ ->
+              req_opts
+          end
+
+        # coveralls-ignore-stop
+
+        max ->
+          Keyword.put(req_opts, :max_tokens, max)
       end
 
     case Keyword.get(opts, :tools) do
@@ -308,26 +512,41 @@ defmodule Liteskill.LLM.StreamHandler do
     end
   end
 
-  defp bedrock_provider_options do
-    config = Application.get_env(:liteskill, Liteskill.LLM, [])
+  defp convert_tool(tool_spec), do: ToolUtils.convert_tool(tool_spec)
 
-    opts = [region: Keyword.get(config, :bedrock_region, "us-east-1"), use_converse: true]
+  @doc """
+  Returns true if the error is transient and the request should be retried.
 
-    case Keyword.get(config, :bedrock_bearer_token) do
-      nil -> opts
-      token -> Keyword.put(opts, :api_key, token)
-    end
-  end
+  Retryable errors include:
+    * HTTP 429 (rate limited)
+    * HTTP 500 (internal server error)
+    * HTTP 502 (bad gateway)
+    * HTTP 503 (service unavailable)
+    * HTTP 504 (gateway timeout)
+    * HTTP 408 (request timeout)
+    * `%Mint.TransportError{}` (connection reset, timeout, closed)
+    * Structs/maps with `reason: "timeout"` or `reason: :timeout` (e.g. `ReqLLM.Error.API.Request`)
+    * Atom errors: `:timeout`, `:closed`, `:econnrefused`
+  """
+  def retryable_error?(%{status: status}) when status in [429, 500, 502, 503, 504, 408], do: true
+  def retryable_error?(%Mint.TransportError{}), do: true
 
-  defp convert_tool(%{"toolSpec" => spec}) do
-    ReqLLM.tool(
-      name: spec["name"],
-      description: spec["description"] || "",
-      parameter_schema: get_in(spec, ["inputSchema", "json"]) || %{},
-      # coveralls-ignore-next-line
-      callback: fn _args -> {:ok, nil} end
-    )
-  end
+  def retryable_error?(%{reason: reason})
+      when reason in ["timeout", :timeout, "closed", :closed],
+      do: true
+
+  def retryable_error?(reason) when reason in [:timeout, :closed, :econnrefused], do: true
+  def retryable_error?({:timeout, _}), do: true
+  def retryable_error?(_), do: false
+
+  @doc false
+  def retryable_error_label(%{status: status}) when is_integer(status), do: "HTTP #{status}"
+  def retryable_error_label(%Mint.TransportError{reason: r}), do: "transport error (#{r})"
+  def retryable_error_label(%{reason: reason}), do: "#{reason}"
+  def retryable_error_label(reason) when is_atom(reason), do: "#{reason}"
+  def retryable_error_label({:timeout, _}), do: "timeout"
+  # coveralls-ignore-next-line
+  def retryable_error_label(_), do: "transient error"
 
   @doc false
   def extract_error_message(%{status: status, response_body: rb})
@@ -361,6 +580,10 @@ defmodule Liteskill.LLM.StreamHandler do
 
   def extract_error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
 
+  def extract_error_message({:timeout, _}), do: "request timeout"
+
+  def extract_error_message(%RuntimeError{message: msg}), do: truncate_error(msg, 500)
+
   def extract_error_message(_reason), do: "LLM request failed"
 
   defp truncate_error(text, max) when byte_size(text) > max do
@@ -374,28 +597,26 @@ defmodule Liteskill.LLM.StreamHandler do
   defp normalize_error(%{status: _} = error) when not is_struct(error), do: error
 
   defp normalize_error(error) when is_struct(error) do
-    cond do
-      Map.has_key?(error, :status) and is_integer(Map.get(error, :status)) ->
-        body =
-          cond do
-            # ReqLLM.Error.API.Request has response_body with the actual error
-            Map.has_key?(error, :response_body) and is_map(Map.get(error, :response_body)) ->
-              Map.get(error, :response_body)
+    if Map.has_key?(error, :status) and is_integer(Map.get(error, :status)) do
+      body =
+        cond do
+          # ReqLLM.Error.API.Request has response_body with the actual error
+          Map.has_key?(error, :response_body) and is_map(Map.get(error, :response_body)) ->
+            Map.get(error, :response_body)
 
-            Map.has_key?(error, :body) ->
-              Map.get(error, :body)
+          Map.has_key?(error, :body) ->
+            Map.get(error, :body)
 
-            Map.has_key?(error, :reason) ->
-              Map.get(error, :reason)
+          Map.has_key?(error, :reason) ->
+            Map.get(error, :reason)
 
-            true ->
-              "LLM request failed"
-          end
+          true ->
+            "LLM request failed"
+        end
 
-        %{status: Map.get(error, :status), body: body}
-
-      true ->
-        error
+      %{status: Map.get(error, :status), body: body}
+    else
+      error
     end
   end
 
@@ -446,20 +667,9 @@ defmodule Liteskill.LLM.StreamHandler do
 
   @doc """
   Formats tool execution output into a string for inclusion in
-  conversation messages.
+  conversation messages. Delegates to `ToolUtils.format_tool_output/1`.
   """
-  def format_tool_output({:ok, %{"content" => content}}) when is_list(content) do
-    content
-    |> Enum.map(fn
-      %{"text" => text} -> text
-      other -> Jason.encode!(other)
-    end)
-    |> Enum.join("\n")
-  end
-
-  def format_tool_output({:ok, data}) when is_map(data), do: Jason.encode!(data)
-  def format_tool_output({:ok, data}), do: inspect(data)
-  def format_tool_output({:error, _err}), do: "Error: tool execution failed"
+  defdelegate format_tool_output(result), to: ToolUtils
 
   # -- Tool call handling --
 
@@ -470,13 +680,14 @@ defmodule Liteskill.LLM.StreamHandler do
          full_content,
          tool_calls,
          latency_ms,
+         usage,
          opts
        ) do
     tools = Keyword.get(opts, :tools, [])
     validated = validate_tool_calls(tool_calls, tools)
 
     if validated == [] do
-      complete_stream(stream_id, message_id, full_content, latency_ms)
+      complete_stream(stream_id, message_id, full_content, latency_ms, usage, opts)
     else
       do_handle_tool_calls(
         stream_id,
@@ -485,6 +696,7 @@ defmodule Liteskill.LLM.StreamHandler do
         full_content,
         validated,
         latency_ms,
+        usage,
         opts
       )
     end
@@ -497,6 +709,7 @@ defmodule Liteskill.LLM.StreamHandler do
          full_content,
          parsed_tool_calls,
          latency_ms,
+         usage,
          opts
        ) do
     auto_confirm = Keyword.get(opts, :auto_confirm, false)
@@ -533,7 +746,15 @@ defmodule Liteskill.LLM.StreamHandler do
 
     if !auto_confirm, do: Phoenix.PubSub.unsubscribe(Liteskill.PubSub, approval_topic)
 
-    complete_stream_with_stop_reason(stream_id, message_id, full_content, "tool_use", latency_ms)
+    complete_stream_with_stop_reason(
+      stream_id,
+      message_id,
+      full_content,
+      "tool_use",
+      latency_ms,
+      usage,
+      opts
+    )
 
     # Build messages for the next round
     assistant_content = build_assistant_content(full_content, parsed_tool_calls)
@@ -557,7 +778,28 @@ defmodule Liteskill.LLM.StreamHandler do
         ]
 
     next_opts = Keyword.put(opts, :tool_round, Keyword.get(opts, :tool_round, 0) + 1)
-    handle_stream(stream_id, next_messages, next_opts)
+
+    # Check cost limit before continuing the tool-call loop
+    cost_limit = Keyword.get(next_opts, :cost_limit)
+    conversation_id = Keyword.get(next_opts, :conversation_id)
+
+    if cost_limit && conversation_id do
+      case Usage.check_cost_limit(:conversation, conversation_id, cost_limit) do
+        :ok ->
+          handle_stream(stream_id, next_messages, next_opts)
+
+        {:error, :cost_limit_exceeded, _current} ->
+          gateway_checkin(opts, :ok)
+
+          Logger.warning(
+            "StreamHandler: cost limit exceeded for #{stream_id}, stopping tool-call loop"
+          )
+
+          {:error, :cost_limit_exceeded}
+      end
+    else
+      handle_stream(stream_id, next_messages, next_opts)
+    end
   end
 
   defp execute_or_await_tool_calls(
@@ -603,22 +845,7 @@ defmodule Liteskill.LLM.StreamHandler do
 
   defp execute_and_record_tool_call(stream_id, message_id, server, tc, opts) do
     start_time = System.monotonic_time(:millisecond)
-    req_opts = Keyword.take(opts, [:plug])
-
-    result =
-      case server do
-        %{builtin: module} ->
-          context = Keyword.take(opts, [:user_id])
-          module.call_tool(tc.name, tc.input, context)
-
-        server when not is_nil(server) ->
-          # coveralls-ignore-next-line
-          McpClient.call_tool(server, tc.name, tc.input, req_opts)
-
-        nil ->
-          {:error, "No server configured for tool #{tc.name}"}
-      end
-
+    result = ToolUtils.execute_tool(server, tc.name, tc.input, opts)
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
     output =
@@ -688,19 +915,24 @@ defmodule Liteskill.LLM.StreamHandler do
 
   # -- Stream completion / failure --
 
-  defp complete_stream(stream_id, message_id, full_content, latency_ms) do
+  defp complete_stream(stream_id, message_id, full_content, latency_ms, usage, opts) do
+    gateway_checkin(opts, :ok)
+
     command =
       {:complete_stream,
        %{
          message_id: message_id,
          full_content: full_content,
          stop_reason: "end_turn",
-         latency_ms: latency_ms
+         latency_ms: latency_ms,
+         input_tokens: get_in_usage(usage, :input_tokens),
+         output_tokens: get_in_usage(usage, :output_tokens)
        }}
 
     case Loader.execute(ConversationAggregate, stream_id, command) do
       {:ok, _state, events} ->
         Projector.project_events(stream_id, events)
+        maybe_record_usage(usage, message_id, latency_ms, "end_turn", opts)
         :ok
 
       # coveralls-ignore-next-line
@@ -714,20 +946,30 @@ defmodule Liteskill.LLM.StreamHandler do
          message_id,
          full_content,
          stop_reason,
-         latency_ms
+         latency_ms,
+         usage,
+         opts
        ) do
+    # Release the gateway slot before event-store write — the LLM call is done.
+    # The next tool-call round will do a fresh checkout via handle_stream/3.
+    # Double-checkin is safe (ProviderGate uses ref matching).
+    gateway_checkin(opts, :ok)
+
     command =
       {:complete_stream,
        %{
          message_id: message_id,
          full_content: full_content,
          stop_reason: stop_reason,
-         latency_ms: latency_ms
+         latency_ms: latency_ms,
+         input_tokens: get_in_usage(usage, :input_tokens),
+         output_tokens: get_in_usage(usage, :output_tokens)
        }}
 
     case Loader.execute(ConversationAggregate, stream_id, command) do
       {:ok, _state, events} ->
         Projector.project_events(stream_id, events)
+        maybe_record_usage(usage, message_id, latency_ms, stop_reason, opts)
         :ok
 
       # coveralls-ignore-next-line
@@ -735,6 +977,28 @@ defmodule Liteskill.LLM.StreamHandler do
         {:error, reason}
     end
   end
+
+  # -- Usage recording --
+
+  defp maybe_record_usage(nil, _message_id, _latency_ms, _stop_reason, _opts), do: :ok
+
+  defp maybe_record_usage(usage, message_id, latency_ms, _stop_reason, opts) do
+    Usage.record_from_response(usage,
+      user_id: Keyword.get(opts, :user_id),
+      llm_model: Keyword.get(opts, :llm_model),
+      model_id: Keyword.get(opts, :model_id, "unknown"),
+      conversation_id: Keyword.get(opts, :conversation_id),
+      message_id: message_id,
+      latency_ms: latency_ms,
+      call_type: "stream",
+      tool_round: Keyword.get(opts, :tool_round, 0)
+    )
+  end
+
+  defp get_in_usage(nil, _key), do: nil
+  defp get_in_usage(usage, key), do: usage[key]
+
+  # -- Stream failure --
 
   defp fail_stream(stream_id, message_id, error_type, error_message, retry_count) do
     command =

@@ -1,4 +1,6 @@
 defmodule Liteskill.Groups do
+  use Boundary, top_level?: true, deps: [], exports: [Group, GroupMembership]
+
   @moduledoc """
   The Groups context. Manages groups and their memberships.
   """
@@ -37,7 +39,7 @@ defmodule Liteskill.Groups do
       is_nil(group) ->
         {:error, :not_found}
 
-      is_member?(group.id, user_id) ->
+      member?(group.id, user_id) ->
         {:ok, group}
 
       true ->
@@ -109,6 +111,10 @@ defmodule Liteskill.Groups do
     end
   end
 
+  def admin_get_group_by_name(name) do
+    Repo.one(from g in Group, where: g.name == ^name)
+  end
+
   def admin_list_members(group_id) do
     GroupMembership
     |> where([gm], gm.group_id == ^group_id)
@@ -152,7 +158,7 @@ defmodule Liteskill.Groups do
     end
   end
 
-  defp is_member?(group_id, user_id) do
+  defp member?(group_id, user_id) do
     Repo.exists?(
       from gm in GroupMembership,
         where: gm.group_id == ^group_id and gm.user_id == ^user_id

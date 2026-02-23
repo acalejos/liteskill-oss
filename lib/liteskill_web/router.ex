@@ -27,6 +27,10 @@ defmodule LiteskillWeb.Router do
 
     get "/session", SessionController, :create
     delete "/logout", SessionController, :delete
+
+    # OpenRouter OAuth PKCE flow (must be above OIDC wildcard routes)
+    get "/openrouter", OpenRouterController, :start
+    get "/openrouter/callback", OpenRouterController, :callback
   end
 
   # Public LiveView routes
@@ -51,6 +55,32 @@ defmodule LiteskillWeb.Router do
     end
   end
 
+  # Admin LiveView routes (require admin role)
+  scope "/", LiteskillWeb do
+    pipe_through [:browser]
+
+    live_session :admin,
+      on_mount: [{LiteskillWeb.Plugs.LiveAuth, :require_admin}] do
+      live "/admin", ChatLive, :admin_usage
+      live "/admin/usage", ChatLive, :admin_usage
+      live "/admin/servers", ChatLive, :admin_servers
+      live "/admin/users", ChatLive, :admin_users
+      live "/admin/groups", ChatLive, :admin_groups
+      live "/admin/providers", ChatLive, :admin_providers
+      live "/admin/models", ChatLive, :admin_models
+      live "/admin/roles", ChatLive, :admin_roles
+      live "/admin/rag", ChatLive, :admin_rag
+      live "/admin/setup", ChatLive, :admin_setup
+    end
+  end
+
+  # Wiki file operations (authenticated browser routes)
+  scope "/wiki", LiteskillWeb do
+    pipe_through [:browser]
+
+    get "/:space_id/export", WikiExportController, :export
+  end
+
   # Authenticated LiveView routes
   scope "/", LiteskillWeb do
     pipe_through [:browser]
@@ -62,13 +92,17 @@ defmodule LiteskillWeb.Router do
       live "/c/:conversation_id", ChatLive, :show
       live "/profile", ChatLive, :info
       live "/profile/password", ChatLive, :password
-      live "/profile/admin/servers", ChatLive, :admin_servers
-      live "/profile/admin/users", ChatLive, :admin_users
-      live "/profile/admin/groups", ChatLive, :admin_groups
-      live "/profile/admin/providers", ChatLive, :admin_providers
-      live "/profile/admin/models", ChatLive, :admin_models
-      live "/wiki", ChatLive, :wiki
-      live "/wiki/:document_id", ChatLive, :wiki_page_show
+      live "/profile/providers", ChatLive, :user_providers
+      live "/profile/models", ChatLive, :user_models
+      # Settings routes (single-user mode unified settings page)
+      live "/settings", ChatLive, :settings_usage
+      live "/settings/general", ChatLive, :settings_general
+      live "/settings/providers", ChatLive, :settings_providers
+      live "/settings/models", ChatLive, :settings_models
+      live "/settings/rag", ChatLive, :settings_rag
+      live "/settings/account", ChatLive, :settings_account
+      live "/wiki", WikiLive, :wiki
+      live "/wiki/:document_id", WikiLive, :wiki_page_show
       live "/sources", ChatLive, :sources
       live "/sources/pipeline", ChatLive, :pipeline
       live "/sources/:source_id", ChatLive, :source_show
@@ -76,6 +110,22 @@ defmodule LiteskillWeb.Router do
       live "/mcp", ChatLive, :mcp_servers
       live "/reports", ChatLive, :reports
       live "/reports/:report_id", ChatLive, :report_show
+      live "/agents", ChatLive, :agent_studio
+      live "/agents/list", ChatLive, :agents
+      live "/agents/new", ChatLive, :agent_new
+      live "/agents/:agent_id", ChatLive, :agent_show
+      live "/agents/:agent_id/edit", ChatLive, :agent_edit
+      live "/teams", ChatLive, :teams
+      live "/teams/new", ChatLive, :team_new
+      live "/teams/:team_id", ChatLive, :team_show
+      live "/teams/:team_id/edit", ChatLive, :team_edit
+      live "/runs", ChatLive, :runs
+      live "/runs/new", ChatLive, :run_new
+      live "/runs/:run_id", ChatLive, :run_show
+      live "/runs/:run_id/logs/:log_id", ChatLive, :run_log_show
+      live "/schedules", ChatLive, :schedules
+      live "/schedules/new", ChatLive, :schedule_new
+      live "/schedules/:schedule_id", ChatLive, :schedule_show
     end
   end
 

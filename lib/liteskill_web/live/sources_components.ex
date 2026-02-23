@@ -310,6 +310,11 @@ defmodule LiteskillWeb.SourcesComponents do
             <.icon name="hero-x-mark-micro" class="size-5" />
           </button>
         </div>
+        <div :if={@source["source_uri"]} class="px-4 pt-3">
+          <.link navigate={@source["source_uri"]} class="btn btn-primary btn-sm w-full gap-1">
+            <.icon name="hero-arrow-top-right-on-square-micro" class="size-4" /> Go to source document
+          </.link>
+        </div>
         <div class="flex-1 overflow-y-auto p-4 space-y-3">
           <div class="bg-base-200/50 rounded-lg p-3">
             <pre class="text-xs whitespace-pre-wrap font-mono leading-relaxed">{@source["content"]}</pre>
@@ -321,11 +326,6 @@ defmodule LiteskillWeb.SourcesComponents do
               Relevance: {Float.round(@source["relevance_score"] * 100, 1)}%
             </span>
           </div>
-        </div>
-        <div :if={@source["source_uri"]} class="p-4 border-t border-base-300">
-          <.link navigate={@source["source_uri"]} class="btn btn-primary btn-sm w-full gap-1">
-            <.icon name="hero-arrow-top-right-on-square-micro" class="size-4" /> Go to source document
-          </.link>
         </div>
       </div>
     </div>
@@ -492,16 +492,28 @@ defmodule LiteskillWeb.SourcesComponents do
             Select a data source type to add.
           </p>
           <div class="grid grid-cols-2 gap-3">
-            <button
-              :for={source_type <- @source_types}
-              phx-click="add_source"
-              phx-value-source-type={source_type.source_type}
-              phx-value-name={source_type.name}
-              class="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-base-300 hover:border-primary hover:bg-primary/5 transition-all cursor-pointer"
-            >
-              <.icon name="hero-folder-micro" class="size-6 text-base-content/60" />
-              <span class="text-sm font-medium">{source_type.name}</span>
-            </button>
+            <%= for source_type <- @source_types do %>
+              <% coming_soon = source_type.source_type in ~w(sharepoint confluence jira github gitlab) %>
+              <button
+                phx-click={unless(coming_soon, do: "add_source")}
+                phx-value-source-type={source_type.source_type}
+                phx-value-name={source_type.name}
+                disabled={coming_soon}
+                class={[
+                  "flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 transition-all",
+                  if(coming_soon,
+                    do: "border-base-300 opacity-50 cursor-not-allowed",
+                    else: "border-base-300 hover:border-primary hover:bg-primary/5 cursor-pointer"
+                  )
+                ]}
+              >
+                <div class="size-10 flex items-center justify-center text-base-content/60">
+                  <.source_type_icon source_type={source_type.source_type} />
+                </div>
+                <span class="text-sm font-medium">{source_type.name}</span>
+                <span :if={coming_soon} class="badge badge-xs badge-ghost">Coming Soon</span>
+              </button>
+            <% end %>
           </div>
         </div>
       </div>
@@ -754,7 +766,7 @@ defmodule LiteskillWeb.SourcesComponents do
   defp can_delete_source?(source, user) do
     not Map.get(source, :builtin, false) and
       (Map.get(source, :user_id) == user.id or
-         Liteskill.Accounts.User.admin?(user))
+         Liteskill.Rbac.has_permission?(user.id, "sources:manage_all"))
   end
 
   defp form_value(form, key) do

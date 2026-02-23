@@ -12,9 +12,15 @@ defmodule Liteskill.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      compilers: [:boundary, :phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
-      test_coverage: [tool: ExCoveralls]
+      test_coverage: [tool: ExCoveralls],
+      releases: releases(),
+      dialyzer: [
+        list_unused_filters: true,
+        plt_add_apps: [:ex_unit],
+        excluded_paths: ["test/support"]
+      ]
     ]
   end
 
@@ -24,7 +30,7 @@ defmodule Liteskill.MixProject do
   def application do
     [
       mod: {Liteskill.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :inets]
     ]
   end
 
@@ -73,7 +79,7 @@ defmodule Liteskill.MixProject do
       {:oban, "~> 2.19"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
-      {:gettext, "~> 1.0"},
+      {:gettext, "~> 1.0", override: true},
       {:jason, "~> 1.2"},
       {:mdex, "~> 0.11"},
       {:dns_cluster, "~> 0.2.0"},
@@ -83,8 +89,16 @@ defmodule Liteskill.MixProject do
       {:oidcc, "~> 3.0"},
       {:argon2_elixir, "~> 4.1"},
       {:jose, "~> 1.11"},
+      {:jido, "~> 2.0.0-rc"},
+      {:boundary, "~> 0.10", runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
-      {:tidewave, "~> 0.5", only: :dev}
+      {:tidewave, "~> 0.5", only: :dev},
+      {:ex_tauri,
+       git: "https://github.com/filipecabaco/ex_tauri.git", optional: true, runtime: false},
+      {:burrito, "~> 1.5", optional: true}
     ]
   end
 
@@ -115,11 +129,56 @@ defmodule Liteskill.MixProject do
         "esbuild liteskill --minify",
         "phx.digest"
       ],
-      "gen.jr_prompt": [
-        "esbuild json_render_prompt",
-        "cmd node priv/json_render_prompt_gen.mjs"
-      ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      "desktop.setup": ["deps.get", "ex_tauri.install"],
+      "desktop.dev": ["ex_tauri.dev"],
+      "desktop.build": ["ex_tauri.build"],
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "credo --strict",
+        "sobelow --config --exit low",
+        "dialyzer",
+        "ecto.create --quiet",
+        "ecto.migrate --quiet",
+        "coveralls",
+        "cmd mdbook build docs/"
+      ]
     ]
+  end
+
+  defp releases do
+    [
+      liteskill: [
+        steps: [:assemble]
+      ],
+      desktop: [
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            macos_aarch64: [os: :darwin, cpu: :aarch64],
+            macos_x86_64: [os: :darwin, cpu: :x86_64],
+            linux_x86_64: linux_target_opts(),
+            windows_x86_64: [os: :windows, cpu: :x86_64]
+          ]
+        ]
+      ]
+    ]
+  end
+
+  # When BURRITO_CUSTOM_ERTS is set, use a glibc ERTS tarball instead of Burrito's
+  # default musl-linked precompiled ERTS. This avoids musl/glibc symbol conflicts
+  # with NIFs (MDEx, argon2) that are compiled against glibc.
+  # skip_nifs: true prevents Burrito from recompiling NIFs with Zig (Linux is always
+  # treated as a cross-build internally), since the NIFs from `mix compile` are
+  # already glibc-linked and compatible with the custom ERTS.
+  defp linux_target_opts do
+    base = [os: :linux, cpu: :x86_64]
+
+    case System.get_env("BURRITO_CUSTOM_ERTS") do
+      nil -> base
+      "" -> base
+      path -> base ++ [custom_erts: path, skip_nifs: true]
+    end
   end
 end

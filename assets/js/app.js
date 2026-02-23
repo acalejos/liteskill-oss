@@ -32,6 +32,24 @@ const Hooks = {
   WikiEditor,
   JsonRender,
 
+  OpenExternalUrl: {
+    mounted() {
+      this.handleEvent("open_external_url", ({ url }) => {
+        // In Tauri desktop, open in system browser via shell:open plugin.
+        // __TAURI_INTERNALS__ is injected by Tauri into all webview pages.
+        if (window.__TAURI_INTERNALS__) {
+          window.__TAURI_INTERNALS__.invoke('plugin:shell|open', { path: url })
+            .catch((err) => {
+              console.error('Tauri shell:open failed, falling back to webview navigation:', err)
+              window.location.href = url
+            })
+        } else {
+          window.location.href = url
+        }
+      })
+    }
+  },
+
   SidebarNav: {
     mounted() {
       this.handleEvent("nav", () => {
@@ -172,6 +190,48 @@ const Hooks = {
       })
     },
     destroyed() { if (this.chart) this.chart.destroy() }
+  },
+
+  RunTimer: {
+    mounted() {
+      this.tick()
+      const status = this.el.dataset.status
+      if (status === "running") {
+        this.interval = setInterval(() => this.tick(), 1000)
+      }
+    },
+    updated() {
+      const status = this.el.dataset.status
+      if (status !== "running" && this.interval) {
+        clearInterval(this.interval)
+        this.interval = null
+      }
+      this.tick()
+    },
+    destroyed() {
+      if (this.interval) clearInterval(this.interval)
+    },
+    tick() {
+      const startedAt = this.el.dataset.startedAt
+      if (!startedAt) {
+        this.el.innerText = "-"
+        return
+      }
+      const start = new Date(startedAt + "Z")
+      const completedAt = this.el.dataset.completedAt
+      const end = completedAt ? new Date(completedAt + "Z") : new Date()
+      const diffMs = Math.max(0, end - start)
+      this.el.innerText = this.formatDuration(diffMs)
+    },
+    formatDuration(ms) {
+      const totalSec = Math.floor(ms / 1000)
+      const h = Math.floor(totalSec / 3600)
+      const m = Math.floor((totalSec % 3600) / 60)
+      const s = totalSec % 60
+      if (h > 0) return `${h}h ${m}m ${s}s`
+      if (m > 0) return `${m}m ${s}s`
+      return `${s}s`
+    }
   },
 
   TextareaAutoResize: {

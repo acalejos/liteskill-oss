@@ -1,4 +1,6 @@
 defmodule Liteskill.Settings do
+  use Boundary, top_level?: true, deps: [], exports: [ServerSettings]
+
   @moduledoc """
   The Settings context. Manages server-wide settings using a singleton row pattern.
 
@@ -11,10 +13,9 @@ defmodule Liteskill.Settings do
   import Ecto.Query
 
   @cache_key {__MODULE__, :settings}
-  @cache_enabled Application.compile_env(:liteskill, :settings_cache, true)
 
   def get do
-    if @cache_enabled do
+    if cache_enabled?() do
       # coveralls-ignore-start
       case :persistent_term.get(@cache_key, nil) do
         nil -> load_and_cache()
@@ -31,6 +32,30 @@ defmodule Liteskill.Settings do
     get().registration_open
   end
 
+  def embedding_enabled? do
+    get().embedding_model_id != nil
+  end
+
+  def get_default_mcp_run_cost_limit do
+    get().default_mcp_run_cost_limit || Decimal.new("1.0")
+  end
+
+  def allow_private_mcp_urls? do
+    get().allow_private_mcp_urls || false
+  end
+
+  def setup_dismissed? do
+    get().setup_dismissed || false
+  end
+
+  def dismiss_setup do
+    update(%{setup_dismissed: true})
+  end
+
+  def update_embedding_model(model_id) do
+    update(%{embedding_model_id: model_id})
+  end
+
   def update(attrs) do
     result =
       load_from_db()
@@ -39,8 +64,9 @@ defmodule Liteskill.Settings do
 
     case result do
       {:ok, settings} ->
+        settings = Repo.preload(settings, :embedding_model, force: true)
         # coveralls-ignore-next-line
-        if @cache_enabled, do: :persistent_term.put(@cache_key, settings)
+        if cache_enabled?(), do: :persistent_term.put(@cache_key, settings)
         {:ok, settings}
 
       # coveralls-ignore-start
@@ -71,10 +97,11 @@ defmodule Liteskill.Settings do
         )
 
         # Re-query to handle race: another process may have inserted first
-        Repo.one!(from s in ServerSettings, limit: 1)
+        Repo.one!(from(s in ServerSettings, limit: 1))
+        |> Repo.preload(:embedding_model)
 
       settings ->
-        settings
+        Repo.preload(settings, :embedding_model)
     end
   end
 
@@ -86,4 +113,6 @@ defmodule Liteskill.Settings do
   end
 
   # coveralls-ignore-stop
+
+  defp cache_enabled?, do: Application.get_env(:liteskill, :settings_cache, true)
 end

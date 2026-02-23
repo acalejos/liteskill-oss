@@ -70,6 +70,29 @@ defmodule LiteskillWeb.Plugs.AuthTest do
     end
   end
 
+  describe "fetch_current_user/2 in single-user mode" do
+    setup do
+      original = Application.get_env(:liteskill, :single_user_mode)
+      Application.put_env(:liteskill, :single_user_mode, true)
+      admin = Liteskill.Accounts.ensure_admin_user()
+
+      on_exit(fn ->
+        Application.put_env(:liteskill, :single_user_mode, original || false)
+      end)
+
+      %{admin: admin}
+    end
+
+    test "auto-assigns admin user without session", %{conn: conn, admin: admin} do
+      conn =
+        conn
+        |> init_test_session(%{})
+        |> Auth.fetch_current_user()
+
+      assert conn.assigns.current_user.id == admin.id
+    end
+  end
+
   describe "require_authenticated_user/2" do
     test "passes through when user is assigned", %{conn: conn} do
       conn =

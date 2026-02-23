@@ -1,14 +1,17 @@
 defmodule Liteskill.LlmProvidersTest do
   use Liteskill.DataCase, async: false
 
-  alias Liteskill.Authorization
   alias Liteskill.Authorization.EntityAcl
   alias Liteskill.LlmProviders
   alias Liteskill.LlmProviders.LlmProvider
+  alias Liteskill.Rbac
 
   import Ecto.Query
 
   setup do
+    # Ensure RBAC system roles exist
+    Rbac.ensure_system_roles()
+
     {:ok, admin} =
       Liteskill.Accounts.find_or_create_from_oidc(%{
         email: "admin-#{System.unique_integer([:positive])}@example.com",
@@ -16,6 +19,10 @@ defmodule Liteskill.LlmProvidersTest do
         oidc_sub: "admin-#{System.unique_integer([:positive])}",
         oidc_issuer: "https://test.example.com"
       })
+
+    # Give admin the Instance Admin role (which has "*" permission)
+    [admin_role] = Rbac.list_roles() |> Enum.filter(&(&1.name == "Instance Admin"))
+    {:ok, _} = Rbac.assign_role_to_user(admin.id, admin_role.id)
 
     {:ok, other} =
       Liteskill.Accounts.find_or_create_from_oidc(%{
@@ -90,21 +97,21 @@ defmodule Liteskill.LlmProvidersTest do
   # --- CRUD ---
 
   describe "create_provider/1" do
-    test "creates provider with valid attrs and owner ACL", %{admin: admin} do
+    test "creates provider with valid attrs", %{admin: admin} do
       assert {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
       assert provider.name == "AWS Bedrock US-East"
       assert provider.provider_type == "amazon_bedrock"
       assert provider.status == "active"
       assert provider.instance_wide == false
 
+      # No owner ACL — RBAC handles management, explicit ACLs handle usage
       acl =
         Repo.one(
           from a in EntityAcl,
             where: a.entity_type == "llm_provider" and a.entity_id == ^provider.id
         )
 
-      assert acl.user_id == admin.id
-      assert acl.role == "owner"
+      assert acl == nil
     end
 
     test "creates provider with all optional fields", %{admin: admin} do
@@ -131,7 +138,7 @@ defmodule Liteskill.LlmProvidersTest do
   end
 
   describe "update_provider/3" do
-    test "owner can update provider", %{admin: admin} do
+    test "admin can update provider", %{admin: admin} do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       assert {:ok, updated} =
@@ -140,7 +147,7 @@ defmodule Liteskill.LlmProvidersTest do
       assert updated.name == "Updated Name"
     end
 
-    test "non-owner cannot update provider", %{admin: admin, other: other} do
+    test "non-admin cannot update provider", %{admin: admin, other: other} do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       assert {:error, :forbidden} =
@@ -154,14 +161,14 @@ defmodule Liteskill.LlmProvidersTest do
   end
 
   describe "delete_provider/2" do
-    test "owner can delete provider", %{admin: admin} do
+    test "admin can delete provider", %{admin: admin} do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       assert {:ok, _} = LlmProviders.delete_provider(provider.id, admin.id)
       assert Repo.get(LlmProvider, provider.id) == nil
     end
 
-    test "non-owner cannot delete provider", %{admin: admin, other: other} do
+    test "non-admin cannot delete provider", %{admin: admin, other: other} do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       assert {:error, :forbidden} = LlmProviders.delete_provider(provider.id, other.id)
@@ -175,10 +182,21 @@ defmodule Liteskill.LlmProvidersTest do
   # --- Queries ---
 
   describe "list_providers/1" do
-    test "returns own providers", %{admin: admin} do
+    test "returns creator's own providers via ownership", %{admin: admin} do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       providers = LlmProviders.list_providers(admin.id)
+      assert length(providers) == 1
+      assert hd(providers).id == provider.id
+    end
+
+    test "returns providers with explicit usage ACL", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      {:ok, _} =
+        LlmProviders.grant_usage(provider.id, other.id, admin.id)
+
+      providers = LlmProviders.list_providers(other.id)
       assert length(providers) == 1
       assert hd(providers).id == provider.id
     end
@@ -205,18 +223,24 @@ defmodule Liteskill.LlmProvidersTest do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       {:ok, _} =
-        Authorization.grant_access("llm_provider", provider.id, admin.id, other.id, "viewer")
+        LlmProviders.grant_usage(provider.id, other.id, admin.id)
 
       providers = LlmProviders.list_providers(other.id)
       assert length(providers) == 1
     end
 
     test "returns providers ordered by name", %{admin: admin} do
-      {:ok, _} =
+      {:ok, p1} =
         LlmProviders.create_provider(valid_attrs(admin.id) |> Map.put(:name, "Zzz Provider"))
 
-      {:ok, _} =
+      {:ok, p2} =
         LlmProviders.create_provider(valid_attrs(admin.id) |> Map.put(:name, "Aaa Provider"))
+
+      {:ok, _} =
+        LlmProviders.grant_usage(p1.id, admin.id, admin.id)
+
+      {:ok, _} =
+        LlmProviders.grant_usage(p2.id, admin.id, admin.id)
 
       providers = LlmProviders.list_providers(admin.id)
       assert length(providers) == 2
@@ -225,7 +249,7 @@ defmodule Liteskill.LlmProvidersTest do
   end
 
   describe "get_provider/2" do
-    test "owner can get provider", %{admin: admin} do
+    test "creator can get own provider via ownership", %{admin: admin} do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       assert {:ok, fetched} = LlmProviders.get_provider(provider.id, admin.id)
@@ -243,7 +267,7 @@ defmodule Liteskill.LlmProvidersTest do
       {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
 
       {:ok, _} =
-        Authorization.grant_access("llm_provider", provider.id, admin.id, other.id, "viewer")
+        LlmProviders.grant_usage(provider.id, other.id, admin.id)
 
       assert {:ok, _} = LlmProviders.get_provider(provider.id, other.id)
     end
@@ -265,6 +289,277 @@ defmodule Liteskill.LlmProvidersTest do
 
       fetched = LlmProviders.get_provider!(provider.id)
       assert fetched.id == provider.id
+    end
+  end
+
+  # --- Environment bootstrap ---
+
+  describe "ensure_env_providers/0" do
+    setup do
+      original = Application.get_env(:liteskill, Liteskill.LLM, [])
+
+      on_exit(fn ->
+        Application.put_env(:liteskill, Liteskill.LLM, original)
+      end)
+
+      # Ensure admin user exists
+      Liteskill.Accounts.ensure_admin_user()
+      admin_email = Liteskill.Accounts.User.admin_email()
+      admin = Liteskill.Accounts.get_user_by_email(admin_email)
+
+      %{real_admin: admin}
+    end
+
+    test "creates provider when env var config is present", %{real_admin: admin} do
+      Application.put_env(:liteskill, Liteskill.LLM,
+        bedrock_bearer_token: "test-env-token",
+        bedrock_region: "us-west-2"
+      )
+
+      assert :ok = LlmProviders.ensure_env_providers()
+
+      providers = LlmProviders.list_providers(admin.id)
+      env_provider = Enum.find(providers, &(&1.name == "Bedrock (environment)"))
+      assert env_provider != nil
+      assert env_provider.provider_type == "amazon_bedrock"
+      assert env_provider.api_key == "test-env-token"
+      assert env_provider.provider_config == %{"region" => "us-west-2"}
+      assert env_provider.instance_wide == true
+      assert env_provider.status == "active"
+    end
+
+    test "is idempotent — calling twice does not duplicate", %{real_admin: admin} do
+      Application.put_env(:liteskill, Liteskill.LLM,
+        bedrock_bearer_token: "test-env-token",
+        bedrock_region: "us-east-1"
+      )
+
+      assert :ok = LlmProviders.ensure_env_providers()
+      assert :ok = LlmProviders.ensure_env_providers()
+
+      providers = LlmProviders.list_providers(admin.id)
+      env_providers = Enum.filter(providers, &(&1.name == "Bedrock (environment)"))
+      assert length(env_providers) == 1
+    end
+
+    test "updates credentials on re-boot", %{real_admin: admin} do
+      Application.put_env(:liteskill, Liteskill.LLM,
+        bedrock_bearer_token: "old-token",
+        bedrock_region: "us-east-1"
+      )
+
+      assert :ok = LlmProviders.ensure_env_providers()
+
+      Application.put_env(:liteskill, Liteskill.LLM,
+        bedrock_bearer_token: "new-token",
+        bedrock_region: "eu-west-1"
+      )
+
+      assert :ok = LlmProviders.ensure_env_providers()
+
+      providers = LlmProviders.list_providers(admin.id)
+      env_provider = Enum.find(providers, &(&1.name == "Bedrock (environment)"))
+      assert env_provider.api_key == "new-token"
+      assert env_provider.provider_config == %{"region" => "eu-west-1"}
+    end
+
+    test "no-op when no env var is set" do
+      Application.put_env(:liteskill, Liteskill.LLM, [])
+
+      assert :ok = LlmProviders.ensure_env_providers()
+    end
+  end
+
+  describe "get_bedrock_credentials/0" do
+    test "returns credentials from active instance-wide provider", %{admin: admin} do
+      {:ok, _} =
+        LlmProviders.create_provider(%{
+          name: "Test Bedrock #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "db-api-key",
+          provider_config: %{"region" => "us-west-2"},
+          instance_wide: true,
+          user_id: admin.id
+        })
+
+      creds = LlmProviders.get_bedrock_credentials()
+      assert creds.api_key == "db-api-key"
+      assert creds.region == "us-west-2"
+    end
+
+    test "returns nil when no bedrock provider exists" do
+      assert LlmProviders.get_bedrock_credentials() == nil
+    end
+
+    test "ignores inactive providers", %{admin: admin} do
+      {:ok, _} =
+        LlmProviders.create_provider(%{
+          name: "Inactive Bedrock #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "inactive-key",
+          provider_config: %{"region" => "us-east-1"},
+          instance_wide: true,
+          status: "inactive",
+          user_id: admin.id
+        })
+
+      assert LlmProviders.get_bedrock_credentials() == nil
+    end
+
+    test "ignores non-instance-wide providers", %{admin: admin} do
+      {:ok, _} =
+        LlmProviders.create_provider(%{
+          name: "Private Bedrock #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "private-key",
+          provider_config: %{"region" => "us-east-1"},
+          instance_wide: false,
+          user_id: admin.id
+        })
+
+      assert LlmProviders.get_bedrock_credentials() == nil
+    end
+
+    test "defaults region to us-east-1 when not in config", %{admin: admin} do
+      {:ok, _} =
+        LlmProviders.create_provider(%{
+          name: "No Region Bedrock #{System.unique_integer([:positive])}",
+          provider_type: "amazon_bedrock",
+          api_key: "key-no-region",
+          provider_config: %{},
+          instance_wide: true,
+          user_id: admin.id
+        })
+
+      creds = LlmProviders.get_bedrock_credentials()
+      assert creds.api_key == "key-no-region"
+      assert creds.region == "us-east-1"
+    end
+  end
+
+  # --- Usage grants ---
+
+  describe "grant_usage/3" do
+    test "non-admin cannot grant usage", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:error, :forbidden} = LlmProviders.grant_usage(provider.id, other.id, other.id)
+    end
+  end
+
+  describe "revoke_usage/3" do
+    test "admin can revoke usage", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+      {:ok, _} = LlmProviders.grant_usage(provider.id, other.id, admin.id)
+
+      assert {:ok, _} = LlmProviders.revoke_usage(provider.id, other.id, admin.id)
+      assert {:error, :not_found} = LlmProviders.get_provider(provider.id, other.id)
+    end
+
+    test "returns not_found when no ACL exists", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:error, :not_found} = LlmProviders.revoke_usage(provider.id, other.id, admin.id)
+    end
+
+    test "non-admin cannot revoke usage", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:error, :forbidden} = LlmProviders.revoke_usage(provider.id, admin.id, other.id)
+    end
+  end
+
+  # --- Admin helpers ---
+
+  describe "list_all_providers/0" do
+    test "returns all providers regardless of user", %{admin: admin} do
+      {:ok, _provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      providers = LlmProviders.list_all_providers()
+      assert providers != []
+    end
+  end
+
+  describe "get_provider_for_admin/1" do
+    test "returns provider without auth checks", %{admin: admin} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:ok, fetched} = LlmProviders.get_provider_for_admin(provider.id)
+      assert fetched.id == provider.id
+    end
+
+    test "returns not_found for missing provider" do
+      assert {:error, :not_found} = LlmProviders.get_provider_for_admin(Ecto.UUID.generate())
+    end
+  end
+
+  # --- Owner-based access ---
+
+  describe "owner can update/delete own provider" do
+    test "non-admin owner can update own provider", %{other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(other.id))
+
+      assert {:ok, updated} =
+               LlmProviders.update_provider(provider.id, other.id, %{name: "Updated"})
+
+      assert updated.name == "Updated"
+    end
+
+    test "non-admin owner can delete own provider", %{other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(other.id))
+
+      assert {:ok, _} = LlmProviders.delete_provider(provider.id, other.id)
+      assert Repo.get(LlmProvider, provider.id) == nil
+    end
+
+    test "non-owner non-admin cannot update", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:error, :forbidden} =
+               LlmProviders.update_provider(provider.id, other.id, %{name: "Hacked"})
+    end
+
+    test "non-owner non-admin cannot delete", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:error, :forbidden} = LlmProviders.delete_provider(provider.id, other.id)
+    end
+  end
+
+  describe "list_owned_providers/1" do
+    test "returns only providers owned by user", %{admin: admin, other: other} do
+      {:ok, _admin_provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      {:ok, other_provider} =
+        LlmProviders.create_provider(valid_attrs(other.id) |> Map.put(:name, "Other's Provider"))
+
+      owned = LlmProviders.list_owned_providers(other.id)
+      assert length(owned) == 1
+      assert hd(owned).id == other_provider.id
+    end
+
+    test "returns empty list for user with no providers", %{other: other} do
+      assert LlmProviders.list_owned_providers(other.id) == []
+    end
+  end
+
+  describe "get_provider_for_owner/2" do
+    test "returns provider owned by user", %{other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(other.id))
+
+      assert {:ok, fetched} = LlmProviders.get_provider_for_owner(provider.id, other.id)
+      assert fetched.id == provider.id
+    end
+
+    test "returns forbidden for non-owner", %{admin: admin, other: other} do
+      {:ok, provider} = LlmProviders.create_provider(valid_attrs(admin.id))
+
+      assert {:error, :forbidden} = LlmProviders.get_provider_for_owner(provider.id, other.id)
+    end
+
+    test "returns not_found for missing provider", %{other: other} do
+      assert {:error, :not_found} =
+               LlmProviders.get_provider_for_owner(Ecto.UUID.generate(), other.id)
     end
   end
 

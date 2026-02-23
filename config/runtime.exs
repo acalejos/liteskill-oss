@@ -31,6 +31,22 @@ if System.get_env("OIDC_CLIENT_ID") do
     client_secret: System.get_env("OIDC_CLIENT_SECRET")
 end
 
+# ReqLLM connection pool — increase default Finch pool size for LLM concurrency.
+# Key must be :finch (not :finch_options) — that's what ReqLLM.Application reads.
+#
+# Timeouts: stream_receive_timeout controls the idle timeout between streaming chunks
+# (including time-to-first-token after sending a large context). Default 30s is too
+# short for tool-calling rounds where the LLM must process prior tool inputs/outputs.
+config :req_llm,
+  stream_receive_timeout: 120_000,
+  receive_timeout: 120_000,
+  finch: [
+    name: ReqLLM.Finch,
+    pools: %{
+      :default => [protocols: [:http1], size: 25, count: 1]
+    }
+  ]
+
 # AWS Bedrock configuration (all environments)
 bedrock_overrides =
   [
@@ -45,12 +61,99 @@ if bedrock_overrides != [] do
   config :liteskill, Liteskill.LLM, Keyword.merge(existing, bedrock_overrides)
 end
 
+# Single-user mode (desktop / self-hosted)
+if System.get_env("SINGLE_USER_MODE") in ~w(true 1 yes) do
+  config :liteskill, :single_user_mode, true
+end
+
 # Encryption key for sensitive fields (MCP API keys, etc.)
 if encryption_key = System.get_env("ENCRYPTION_KEY") do
   config :liteskill, :encryption_key, encryption_key
 end
 
-if config_env() == :prod do
+# Desktop mode: bundled PostgreSQL, single-user, no external dependencies
+if System.get_env("LITESKILL_DESKTOP") == "true" do
+  desktop_data_dir =
+    case :os.type() do
+      {:unix, :darwin} ->
+        Path.join(System.get_env("HOME", "~"), "Library/Application Support/Liteskill")
+
+      {:unix, _} ->
+        xdg =
+          System.get_env("XDG_DATA_HOME", Path.join(System.get_env("HOME", "~"), ".local/share"))
+
+        Path.join(xdg, "liteskill")
+
+      {:win32, _} ->
+        Path.join(System.get_env("APPDATA", "C:/Users/Default/AppData/Roaming"), "Liteskill")
+    end
+
+  # NOTE: This config creation logic is intentionally duplicated from
+  # Liteskill.Desktop.load_or_create_config!/1 because runtime.exs executes
+  # before application code is available in releases. If you change the key
+  # structure here, update Desktop.load_or_create_config!/1 to match.
+  desktop_config_path = Path.join(desktop_data_dir, "desktop_config.json")
+
+  desktop_config =
+    if File.exists?(desktop_config_path) do
+      desktop_config_path |> File.read!() |> Jason.decode!()
+    else
+      cfg = %{
+        "encryption_key" => Base.url_encode64(:crypto.strong_rand_bytes(48), padding: false),
+        "secret_key_base" => Base.url_encode64(:crypto.strong_rand_bytes(48), padding: false)
+      }
+
+      File.mkdir_p!(desktop_data_dir)
+      File.write!(desktop_config_path, Jason.encode!(cfg, pretty: true))
+      cfg
+    end
+
+  config :liteskill, :single_user_mode, true
+  config :liteskill, :desktop_mode, true
+  config :liteskill, :desktop_data_dir, desktop_data_dir
+
+  unless System.get_env("ENCRYPTION_KEY") do
+    config :liteskill, :encryption_key, desktop_config["encryption_key"]
+  end
+
+  repo_opts =
+    case :os.type() do
+      {:win32, _} ->
+        pg_port = String.to_integer(System.get_env("LITESKILL_PG_PORT", "15432"))
+        config :liteskill, :desktop_pg_port, pg_port
+        [database: "liteskill_desktop", hostname: "localhost", port: pg_port, pool_size: 5]
+
+      _ ->
+        socket_dir = Path.join(desktop_data_dir, "pg_socket")
+        [database: "liteskill_desktop", socket_dir: socket_dir, pool_size: 5]
+    end
+
+  config :liteskill, Liteskill.Repo, repo_opts
+
+  port = String.to_integer(System.get_env("PORT", "4000"))
+
+  config :liteskill, LiteskillWeb.Endpoint,
+    url: [host: "localhost", port: port, scheme: "http"],
+    http: [ip: {127, 0, 0, 1}, port: port],
+    server: true,
+    check_origin: false,
+    secret_key_base: desktop_config["secret_key_base"]
+
+  config :liteskill, :dns_cluster_query, nil
+end
+
+if config_env() == :test do
+  database_url =
+    System.get_env("DATABASE_URL") ||
+      "ecto://postgres:postgres@localhost/liteskill_test#{System.get_env("MIX_TEST_PARTITION", "")}"
+
+  config :liteskill, Liteskill.Repo,
+    url: database_url,
+    pool: Ecto.Adapters.SQL.Sandbox,
+    pool_size: System.schedulers_online() * 2
+end
+
+if config_env() == :prod and System.get_env("LITESKILL_DESKTOP") != "true" do
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """

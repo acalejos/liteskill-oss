@@ -1,16 +1,19 @@
 defmodule Liteskill.LlmModelsTest do
   use Liteskill.DataCase, async: false
 
-  alias Liteskill.Authorization
   alias Liteskill.Authorization.EntityAcl
   alias Liteskill.LlmModels
   alias Liteskill.LlmModels.LlmModel
   alias Liteskill.LlmProviders
   alias Liteskill.LlmProviders.LlmProvider
+  alias Liteskill.Rbac
 
   import Ecto.Query
 
   setup do
+    # Ensure RBAC system roles exist
+    Rbac.ensure_system_roles()
+
     {:ok, admin} =
       Liteskill.Accounts.find_or_create_from_oidc(%{
         email: "admin-#{System.unique_integer([:positive])}@example.com",
@@ -18,6 +21,10 @@ defmodule Liteskill.LlmModelsTest do
         oidc_sub: "admin-#{System.unique_integer([:positive])}",
         oidc_issuer: "https://test.example.com"
       })
+
+    # Give admin the Instance Admin role (which has "*" permission)
+    [admin_role] = Rbac.list_roles() |> Enum.filter(&(&1.name == "Instance Admin"))
+    {:ok, _} = Rbac.assign_role_to_user(admin.id, admin_role.id)
 
     {:ok, other} =
       Liteskill.Accounts.find_or_create_from_oidc(%{
@@ -97,7 +104,7 @@ defmodule Liteskill.LlmModelsTest do
   # --- CRUD ---
 
   describe "create_model/1" do
-    test "creates model with valid attrs and owner ACL", %{admin: admin, provider: provider} do
+    test "creates model with valid attrs", %{admin: admin, provider: provider} do
       assert {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
       assert model.name == "Claude Sonnet"
       assert model.provider_id == provider.id
@@ -106,13 +113,13 @@ defmodule Liteskill.LlmModelsTest do
       assert model.instance_wide == false
       assert model.model_type == "inference"
 
+      # No owner ACL — RBAC handles management, explicit ACLs handle usage
       acl =
         Repo.one(
           from a in EntityAcl, where: a.entity_type == "llm_model" and a.entity_id == ^model.id
         )
 
-      assert acl.user_id == admin.id
-      assert acl.role == "owner"
+      assert acl == nil
     end
 
     test "creates model with all optional fields", %{admin: admin, provider: provider} do
@@ -139,7 +146,7 @@ defmodule Liteskill.LlmModelsTest do
   end
 
   describe "update_model/3" do
-    test "owner can update model", %{admin: admin, provider: provider} do
+    test "admin can update model", %{admin: admin, provider: provider} do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       assert {:ok, updated} = LlmModels.update_model(model.id, admin.id, %{name: "Updated Name"})
@@ -147,7 +154,7 @@ defmodule Liteskill.LlmModelsTest do
       assert updated.provider.name == "Test Bedrock"
     end
 
-    test "non-owner cannot update model", %{admin: admin, other: other, provider: provider} do
+    test "non-admin cannot update model", %{admin: admin, other: other, provider: provider} do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       assert {:error, :forbidden} = LlmModels.update_model(model.id, other.id, %{name: "Hacked"})
@@ -169,14 +176,14 @@ defmodule Liteskill.LlmModelsTest do
   end
 
   describe "delete_model/2" do
-    test "owner can delete model", %{admin: admin, provider: provider} do
+    test "admin can delete model", %{admin: admin, provider: provider} do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       assert {:ok, _} = LlmModels.delete_model(model.id, admin.id)
       assert Repo.get(LlmModel, model.id) == nil
     end
 
-    test "non-owner cannot delete model", %{admin: admin, other: other, provider: provider} do
+    test "non-admin cannot delete model", %{admin: admin, other: other, provider: provider} do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       assert {:error, :forbidden} = LlmModels.delete_model(model.id, other.id)
@@ -190,10 +197,28 @@ defmodule Liteskill.LlmModelsTest do
   # --- Queries ---
 
   describe "list_models/1" do
-    test "returns own models with preloaded provider", %{admin: admin, provider: provider} do
+    test "returns creator's own models via ownership", %{
+      admin: admin,
+      provider: provider
+    } do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       models = LlmModels.list_models(admin.id)
+      assert length(models) == 1
+      assert hd(models).id == model.id
+      assert hd(models).provider.name == "Test Bedrock"
+    end
+
+    test "returns models with explicit usage ACL", %{
+      admin: admin,
+      other: other,
+      provider: provider
+    } do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      {:ok, _} = LlmModels.grant_usage(model.id, other.id, admin.id)
+
+      models = LlmModels.list_models(other.id)
       assert length(models) == 1
       assert hd(models).id == model.id
       assert hd(models).provider.name == "Test Bedrock"
@@ -225,21 +250,25 @@ defmodule Liteskill.LlmModelsTest do
     test "returns ACL-shared models", %{admin: admin, other: other, provider: provider} do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
-      {:ok, _} = Authorization.grant_access("llm_model", model.id, admin.id, other.id, "viewer")
+      {:ok, _} = LlmModels.grant_usage(model.id, other.id, admin.id)
 
       models = LlmModels.list_models(other.id)
       assert length(models) == 1
     end
 
     test "returns models ordered by name", %{admin: admin, provider: provider} do
-      {:ok, _} =
+      {:ok, m1} =
         LlmModels.create_model(valid_attrs(admin.id, provider.id) |> Map.put(:name, "Zzz Model"))
 
-      {:ok, _} =
+      {:ok, m2} =
         LlmModels.create_model(
           valid_attrs(admin.id, provider.id)
           |> Map.merge(%{name: "Aaa Model", model_id: "aaa-model"})
         )
+
+      # Grant usage access so they appear in the list
+      {:ok, _} = LlmModels.grant_usage(m1.id, admin.id, admin.id)
+      {:ok, _} = LlmModels.grant_usage(m2.id, admin.id, admin.id)
 
       models = LlmModels.list_models(admin.id)
       assert length(models) == 2
@@ -249,7 +278,7 @@ defmodule Liteskill.LlmModelsTest do
 
   describe "list_active_models/1" do
     test "filters out inactive models", %{admin: admin, provider: provider} do
-      {:ok, _active} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+      {:ok, active} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       {:ok, _inactive} =
         LlmModels.create_model(
@@ -257,19 +286,36 @@ defmodule Liteskill.LlmModelsTest do
           |> Map.merge(%{status: "inactive", model_id: "inactive-model"})
         )
 
+      {:ok, _} = LlmModels.grant_usage(active.id, admin.id, admin.id)
+
       models = LlmModels.list_active_models(admin.id)
       assert length(models) == 1
       assert hd(models).status == "active"
     end
 
-    test "filters by model_type", %{admin: admin, provider: provider} do
-      {:ok, _inference} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+    test "returns creator's own active models via ownership", %{
+      admin: admin,
+      provider: provider
+    } do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
-      {:ok, _embedding} =
+      models = LlmModels.list_active_models(admin.id)
+      assert length(models) == 1
+      assert hd(models).id == model.id
+    end
+
+    test "filters by model_type", %{admin: admin, provider: provider} do
+      {:ok, inference} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      {:ok, embedding} =
         LlmModels.create_model(
           valid_attrs(admin.id, provider.id)
           |> Map.merge(%{model_type: "embedding", model_id: "embed-model"})
         )
+
+      # Grant usage access
+      {:ok, _} = LlmModels.grant_usage(inference.id, admin.id, admin.id)
+      {:ok, _} = LlmModels.grant_usage(embedding.id, admin.id, admin.id)
 
       inference_models = LlmModels.list_active_models(admin.id, model_type: "inference")
       assert length(inference_models) == 1
@@ -284,13 +330,16 @@ defmodule Liteskill.LlmModelsTest do
       admin: admin,
       provider: provider
     } do
-      {:ok, _inference} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+      {:ok, inference} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
-      {:ok, _embedding} =
+      {:ok, embedding} =
         LlmModels.create_model(
           valid_attrs(admin.id, provider.id)
           |> Map.merge(%{model_type: "embedding", model_id: "embed-model"})
         )
+
+      {:ok, _} = LlmModels.grant_usage(inference.id, admin.id, admin.id)
+      {:ok, _} = LlmModels.grant_usage(embedding.id, admin.id, admin.id)
 
       models = LlmModels.list_active_models(admin.id)
       assert length(models) == 2
@@ -305,7 +354,7 @@ defmodule Liteskill.LlmModelsTest do
           user_id: admin.id
         })
 
-      {:ok, _model_on_inactive} =
+      {:ok, model_on_inactive} =
         LlmModels.create_model(%{
           name: "Model on Inactive",
           model_id: "gpt-4o-inactive",
@@ -321,7 +370,7 @@ defmodule Liteskill.LlmModelsTest do
           user_id: admin.id
         })
 
-      {:ok, _model_on_active} =
+      {:ok, model_on_active} =
         LlmModels.create_model(%{
           name: "Model on Active",
           model_id: "claude-active",
@@ -330,6 +379,10 @@ defmodule Liteskill.LlmModelsTest do
           status: "active"
         })
 
+      # Grant usage for both
+      {:ok, _} = LlmModels.grant_usage(model_on_inactive.id, admin.id, admin.id)
+      {:ok, _} = LlmModels.grant_usage(model_on_active.id, admin.id, admin.id)
+
       models = LlmModels.list_active_models(admin.id)
       assert length(models) == 1
       assert hd(models).name == "Model on Active"
@@ -337,7 +390,10 @@ defmodule Liteskill.LlmModelsTest do
   end
 
   describe "get_model/2" do
-    test "owner can get model", %{admin: admin, provider: provider} do
+    test "creator can get own model via ownership", %{
+      admin: admin,
+      provider: provider
+    } do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       assert {:ok, fetched} = LlmModels.get_model(model.id, admin.id)
@@ -358,7 +414,7 @@ defmodule Liteskill.LlmModelsTest do
 
     test "ACL-shared model accessible", %{admin: admin, other: other, provider: provider} do
       {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
-      {:ok, _} = Authorization.grant_access("llm_model", model.id, admin.id, other.id, "viewer")
+      {:ok, _} = LlmModels.grant_usage(model.id, other.id, admin.id)
 
       assert {:ok, _} = LlmModels.get_model(model.id, other.id)
     end
@@ -412,7 +468,7 @@ defmodule Liteskill.LlmModelsTest do
 
       assert Keyword.get(opts, :provider_options) |> Keyword.get(:region) == "us-west-2"
       assert Keyword.get(opts, :provider_options) |> Keyword.get(:use_converse) == true
-      assert Keyword.get(opts, :provider_options) |> Keyword.get(:api_key) == "my-token"
+      assert Keyword.get(opts, :api_key) == "my-token"
     end
 
     test "amazon_bedrock defaults region" do
@@ -461,7 +517,7 @@ defmodule Liteskill.LlmModelsTest do
       assert Keyword.get(provider_opts, :resource_name) == "my-resource"
       assert Keyword.get(provider_opts, :deployment_id) == "gpt4o-deploy"
       assert Keyword.get(provider_opts, :api_version) == "2024-02-15"
-      assert Keyword.get(provider_opts, :api_key) == "az-key"
+      assert Keyword.get(opts, :api_key) == "az-key"
     end
 
     test "azure omits nil config values" do
@@ -491,7 +547,8 @@ defmodule Liteskill.LlmModelsTest do
       {model_spec, opts} = LlmModels.build_provider_options(model)
 
       assert model_spec == %{id: "claude-3-5-sonnet", provider: :anthropic}
-      assert Keyword.get(opts, :provider_options) == [api_key: "sk-ant-xxx"]
+      assert Keyword.get(opts, :provider_options) == []
+      assert Keyword.get(opts, :api_key) == "sk-ant-xxx"
     end
 
     test "openai with api_key" do
@@ -506,7 +563,8 @@ defmodule Liteskill.LlmModelsTest do
       {model_spec, opts} = LlmModels.build_provider_options(model)
 
       assert model_spec == %{id: "gpt-4o", provider: :openai}
-      assert Keyword.get(opts, :provider_options) == [api_key: "sk-xxx"]
+      assert Keyword.get(opts, :provider_options) == []
+      assert Keyword.get(opts, :api_key) == "sk-xxx"
     end
 
     test "provider without api_key" do
@@ -536,8 +594,8 @@ defmodule Liteskill.LlmModelsTest do
       {_model_spec, opts} = LlmModels.build_provider_options(model)
 
       assert Keyword.get(opts, :base_url) == "http://litellm:4000/v1"
+      assert Keyword.get(opts, :api_key) == "sk-xxx"
       provider_opts = Keyword.get(opts, :provider_options)
-      assert Keyword.get(provider_opts, :api_key) == "sk-xxx"
       refute Keyword.has_key?(provider_opts, :base_url)
     end
 
@@ -584,10 +642,10 @@ defmodule Liteskill.LlmModelsTest do
       {_model_spec, opts} = LlmModels.build_provider_options(model)
 
       assert Keyword.get(opts, :base_url) == "http://custom:8080"
+      assert Keyword.get(opts, :api_key) == "token"
       provider_opts = Keyword.get(opts, :provider_options)
       assert Keyword.get(provider_opts, :region) == "eu-west-1"
       assert Keyword.get(provider_opts, :use_converse) == true
-      assert Keyword.get(provider_opts, :api_key) == "token"
     end
 
     test "unknown config keys are skipped gracefully" do
@@ -601,9 +659,105 @@ defmodule Liteskill.LlmModelsTest do
 
       {_model_spec, opts} = LlmModels.build_provider_options(model)
 
+      assert Keyword.get(opts, :api_key) == "sk-xxx"
       provider_opts = Keyword.get(opts, :provider_options)
-      assert Keyword.get(provider_opts, :api_key) == "sk-xxx"
-      assert length(provider_opts) == 1
+      assert provider_opts == []
+    end
+  end
+
+  describe "build_provider_options/2 — prompt caching" do
+    test "switches to native API for Anthropic on Bedrock" do
+      provider = %LlmProvider{
+        provider_type: "amazon_bedrock",
+        api_key: nil,
+        provider_config: %{"region" => "us-east-1"}
+      }
+
+      model = %LlmModel{
+        model_id: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        provider: provider
+      }
+
+      {_model_spec, opts} = LlmModels.build_provider_options(model, enable_caching: true)
+      provider_opts = Keyword.get(opts, :provider_options)
+
+      # Switches to native Anthropic API (not Converse) for caching support.
+      # Actual anthropic_prompt_cache is set by LlmGenerate based on tool count.
+      assert Keyword.get(provider_opts, :use_converse) == false
+      refute Keyword.has_key?(provider_opts, :anthropic_prompt_cache)
+    end
+
+    test "does not switch API for non-Anthropic Bedrock models" do
+      provider = %LlmProvider{
+        provider_type: "amazon_bedrock",
+        api_key: nil,
+        provider_config: %{"region" => "us-east-1"}
+      }
+
+      model = %LlmModel{
+        model_id: "amazon.titan-text-express-v1",
+        provider: provider
+      }
+
+      {_model_spec, opts} = LlmModels.build_provider_options(model, enable_caching: true)
+      provider_opts = Keyword.get(opts, :provider_options)
+
+      assert Keyword.get(provider_opts, :use_converse) == true
+    end
+
+    test "does not switch API for non-Bedrock providers" do
+      provider = %LlmProvider{
+        provider_type: "anthropic",
+        api_key: "sk-ant-xxx",
+        provider_config: %{}
+      }
+
+      model = %LlmModel{
+        model_id: "claude-3-5-sonnet",
+        provider: provider
+      }
+
+      {_model_spec, opts} = LlmModels.build_provider_options(model, enable_caching: true)
+      provider_opts = Keyword.get(opts, :provider_options)
+
+      refute Keyword.has_key?(provider_opts, :use_converse)
+    end
+
+    test "does not switch API when enable_caching is false" do
+      provider = %LlmProvider{
+        provider_type: "amazon_bedrock",
+        api_key: nil,
+        provider_config: %{"region" => "us-east-1"}
+      }
+
+      model = %LlmModel{
+        model_id: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        provider: provider
+      }
+
+      {_model_spec, opts} = LlmModels.build_provider_options(model, enable_caching: false)
+      provider_opts = Keyword.get(opts, :provider_options)
+
+      assert Keyword.get(provider_opts, :use_converse) == true
+    end
+
+    test "backward compat — 1-arity call works unchanged" do
+      provider = %LlmProvider{
+        provider_type: "amazon_bedrock",
+        api_key: nil,
+        provider_config: %{"region" => "us-east-1"}
+      }
+
+      model = %LlmModel{
+        model_id: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        provider: provider
+      }
+
+      {_model_spec, opts} = LlmModels.build_provider_options(model)
+      provider_opts = Keyword.get(opts, :provider_options)
+
+      # No caching by default
+      assert Keyword.get(provider_opts, :use_converse) == true
     end
   end
 
@@ -611,7 +765,8 @@ defmodule Liteskill.LlmModelsTest do
 
   describe "LLM.available_models/1" do
     test "returns DB models when they exist", %{admin: admin, provider: provider} do
-      {:ok, _model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+      {:ok, _} = LlmModels.grant_usage(model.id, admin.id, admin.id)
 
       result = Liteskill.LLM.available_models(admin.id)
       assert is_list(result)
@@ -625,6 +780,83 @@ defmodule Liteskill.LlmModelsTest do
     end
 
     test "only returns inference models", %{admin: admin, provider: provider} do
+      {:ok, inference} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      {:ok, embedding} =
+        LlmModels.create_model(
+          valid_attrs(admin.id, provider.id)
+          |> Map.merge(%{model_type: "embedding", model_id: "embed-model"})
+        )
+
+      {:ok, _} = LlmModels.grant_usage(inference.id, admin.id, admin.id)
+      {:ok, _} = LlmModels.grant_usage(embedding.id, admin.id, admin.id)
+
+      result = Liteskill.LLM.available_models(admin.id)
+      assert length(result) == 1
+      assert hd(result).model_type == "inference"
+    end
+  end
+
+  # --- Usage grants ---
+
+  describe "grant_usage/3" do
+    test "non-admin cannot grant usage", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:error, :forbidden} = LlmModels.grant_usage(model.id, other.id, other.id)
+    end
+  end
+
+  describe "revoke_usage/3" do
+    test "admin can revoke usage", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+      {:ok, _} = LlmModels.grant_usage(model.id, other.id, admin.id)
+
+      assert {:ok, _} = LlmModels.revoke_usage(model.id, other.id, admin.id)
+      assert {:error, :not_found} = LlmModels.get_model(model.id, other.id)
+    end
+
+    test "returns not_found when no ACL exists", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:error, :not_found} = LlmModels.revoke_usage(model.id, other.id, admin.id)
+    end
+
+    test "non-admin cannot revoke usage", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:error, :forbidden} = LlmModels.revoke_usage(model.id, admin.id, other.id)
+    end
+  end
+
+  # --- Admin helpers ---
+
+  describe "list_all_models/0" do
+    test "returns all models regardless of user", %{admin: admin, provider: provider} do
+      {:ok, _model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      models = LlmModels.list_all_models()
+      assert models != []
+      assert Enum.all?(models, &(&1.provider != nil))
+    end
+  end
+
+  describe "list_all_active_models/1" do
+    test "returns all active models without user filtering", %{admin: admin, provider: provider} do
+      {:ok, _active} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      {:ok, _inactive} =
+        LlmModels.create_model(
+          valid_attrs(admin.id, provider.id)
+          |> Map.merge(%{status: "inactive", model_id: "inactive-model"})
+        )
+
+      models = LlmModels.list_all_active_models()
+      active_names = Enum.map(models, & &1.name)
+      assert "Claude Sonnet" in active_names
+    end
+
+    test "filters by model_type", %{admin: admin, provider: provider} do
       {:ok, _inference} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
 
       {:ok, _embedding} =
@@ -633,9 +865,164 @@ defmodule Liteskill.LlmModelsTest do
           |> Map.merge(%{model_type: "embedding", model_id: "embed-model"})
         )
 
-      result = Liteskill.LLM.available_models(admin.id)
-      assert length(result) == 1
-      assert hd(result).model_type == "inference"
+      models = LlmModels.list_all_active_models(model_type: "embedding")
+      assert Enum.all?(models, &(&1.model_type == "embedding"))
+    end
+  end
+
+  describe "get_model_for_admin/1" do
+    test "returns model without auth checks", %{admin: admin, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:ok, fetched} = LlmModels.get_model_for_admin(model.id)
+      assert fetched.id == model.id
+      assert fetched.provider.name == "Test Bedrock"
+    end
+
+    test "returns not_found for missing model" do
+      assert {:error, :not_found} = LlmModels.get_model_for_admin(Ecto.UUID.generate())
+    end
+  end
+
+  # --- Owner-based access ---
+
+  describe "provider ownership validation" do
+    test "user can create model on own provider", %{other: other} do
+      {:ok, other_provider} =
+        LlmProviders.create_provider(%{
+          name: "Other's Provider",
+          provider_type: "openai",
+          user_id: other.id
+        })
+
+      assert {:ok, model} =
+               LlmModels.create_model(valid_attrs(other.id, other_provider.id))
+
+      assert model.provider_id == other_provider.id
+    end
+
+    test "user cannot create model on another user's provider", %{admin: admin, other: other} do
+      # admin owns the default provider
+      {:ok, admin_provider} =
+        LlmProviders.create_provider(%{
+          name: "Admin Provider",
+          provider_type: "openai",
+          user_id: admin.id
+        })
+
+      assert {:error, :provider_not_owned} =
+               LlmModels.create_model(valid_attrs(other.id, admin_provider.id))
+    end
+
+    test "admin can create model on any provider", %{admin: admin, other: other} do
+      {:ok, other_provider} =
+        LlmProviders.create_provider(%{
+          name: "Other's Provider",
+          provider_type: "openai",
+          user_id: other.id
+        })
+
+      assert {:ok, _model} =
+               LlmModels.create_model(valid_attrs(admin.id, other_provider.id))
+    end
+  end
+
+  describe "owner can update/delete own model" do
+    test "non-admin owner can update own model", %{other: other} do
+      {:ok, other_provider} =
+        LlmProviders.create_provider(%{
+          name: "Other's Provider",
+          provider_type: "openai",
+          user_id: other.id
+        })
+
+      {:ok, model} = LlmModels.create_model(valid_attrs(other.id, other_provider.id))
+
+      assert {:ok, updated} = LlmModels.update_model(model.id, other.id, %{name: "Updated"})
+      assert updated.name == "Updated"
+    end
+
+    test "non-admin owner can delete own model", %{other: other} do
+      {:ok, other_provider} =
+        LlmProviders.create_provider(%{
+          name: "Other's Provider",
+          provider_type: "openai",
+          user_id: other.id
+        })
+
+      {:ok, model} = LlmModels.create_model(valid_attrs(other.id, other_provider.id))
+
+      assert {:ok, _} = LlmModels.delete_model(model.id, other.id)
+      assert Repo.get(LlmModel, model.id) == nil
+    end
+
+    test "non-owner non-admin cannot update", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:error, :forbidden} =
+               LlmModels.update_model(model.id, other.id, %{name: "Hacked"})
+    end
+
+    test "non-owner non-admin cannot delete", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:error, :forbidden} = LlmModels.delete_model(model.id, other.id)
+    end
+  end
+
+  describe "list_owned_models/1" do
+    test "returns only models owned by user", %{admin: admin, other: other, provider: provider} do
+      {:ok, _admin_model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      {:ok, other_provider} =
+        LlmProviders.create_provider(%{
+          name: "Other's Provider",
+          provider_type: "openai",
+          user_id: other.id
+        })
+
+      {:ok, other_model} =
+        LlmModels.create_model(
+          valid_attrs(other.id, other_provider.id)
+          |> Map.put(:name, "Other's Model")
+        )
+
+      owned = LlmModels.list_owned_models(other.id)
+      assert length(owned) == 1
+      assert hd(owned).id == other_model.id
+      assert hd(owned).provider.name == "Other's Provider"
+    end
+
+    test "returns empty list for user with no models", %{other: other} do
+      assert LlmModels.list_owned_models(other.id) == []
+    end
+  end
+
+  describe "get_model_for_owner/2" do
+    test "returns model owned by user", %{other: other} do
+      {:ok, other_provider} =
+        LlmProviders.create_provider(%{
+          name: "Other's Provider",
+          provider_type: "openai",
+          user_id: other.id
+        })
+
+      {:ok, model} = LlmModels.create_model(valid_attrs(other.id, other_provider.id))
+
+      assert {:ok, fetched} = LlmModels.get_model_for_owner(model.id, other.id)
+      assert fetched.id == model.id
+      assert fetched.provider.name == "Other's Provider"
+    end
+
+    test "returns forbidden for non-owner", %{admin: admin, other: other, provider: provider} do
+      {:ok, model} = LlmModels.create_model(valid_attrs(admin.id, provider.id))
+
+      assert {:error, :forbidden} = LlmModels.get_model_for_owner(model.id, other.id)
+    end
+
+    test "returns not_found for missing model", %{other: other} do
+      assert {:error, :not_found} =
+               LlmModels.get_model_for_owner(Ecto.UUID.generate(), other.id)
     end
   end
 

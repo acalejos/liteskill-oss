@@ -141,16 +141,16 @@ defmodule Liteskill.AuthorizationTest do
     end
   end
 
-  describe "is_owner?/3" do
+  describe "owner?/3" do
     test "true for owner", %{user: user, entity_id: eid, entity_type: etype} do
       {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
-      assert Authorization.is_owner?(etype, eid, user.id)
+      assert Authorization.owner?(etype, eid, user.id)
     end
 
     test "false for manager", %{user: user, other: other, entity_id: eid, entity_type: etype} do
       {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
       {:ok, _} = Authorization.grant_access(etype, eid, user.id, other.id, "manager")
-      refute Authorization.is_owner?(etype, eid, other.id)
+      refute Authorization.owner?(etype, eid, other.id)
     end
   end
 
@@ -422,6 +422,94 @@ defmodule Liteskill.AuthorizationTest do
     end
   end
 
+  describe "has_usage_access?/3" do
+    test "returns false for owner-only ACL", %{user: user, entity_id: eid, entity_type: etype} do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      refute Authorization.has_usage_access?(etype, eid, user.id)
+    end
+
+    test "returns true for viewer ACL", %{
+      user: user,
+      other: other,
+      entity_id: eid,
+      entity_type: etype
+    } do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      {:ok, _} = Authorization.grant_access(etype, eid, user.id, other.id, "viewer")
+      assert Authorization.has_usage_access?(etype, eid, other.id)
+    end
+
+    test "returns true for manager ACL", %{
+      user: user,
+      other: other,
+      entity_id: eid,
+      entity_type: etype
+    } do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      {:ok, _} = Authorization.grant_access(etype, eid, user.id, other.id, "manager")
+      assert Authorization.has_usage_access?(etype, eid, other.id)
+    end
+
+    test "returns true for group-based non-owner ACL", %{
+      user: user,
+      other: other,
+      entity_id: eid,
+      entity_type: etype
+    } do
+      {:ok, _} = Authorization.create_owner_acl(etype, eid, user.id)
+      {:ok, group} = Groups.create_group("Usage Group", user.id)
+      {:ok, _} = Groups.add_member(group.id, user.id, other.id)
+      {:ok, _} = Authorization.grant_group_access(etype, eid, user.id, group.id, "viewer")
+      assert Authorization.has_usage_access?(etype, eid, other.id)
+    end
+
+    test "returns false for no access", %{other: other, entity_id: eid, entity_type: etype} do
+      refute Authorization.has_usage_access?(etype, eid, other.id)
+    end
+  end
+
+  describe "usage_accessible_entity_ids/2" do
+    test "excludes owner-role entries", %{user: user, entity_type: etype} do
+      id1 = Ecto.UUID.generate()
+      {:ok, _} = Authorization.create_owner_acl(etype, id1, user.id)
+
+      query = Authorization.usage_accessible_entity_ids(etype, user.id)
+      ids = Repo.all(query)
+
+      refute id1 in ids
+    end
+
+    test "includes non-owner direct ACLs", %{
+      user: user,
+      other: other,
+      entity_type: etype
+    } do
+      entity_id = Ecto.UUID.generate()
+      {:ok, _} = Authorization.create_owner_acl(etype, entity_id, user.id)
+      {:ok, _} = Authorization.grant_access(etype, entity_id, user.id, other.id, "viewer")
+
+      query = Authorization.usage_accessible_entity_ids(etype, other.id)
+      ids = Repo.all(query)
+      assert entity_id in ids
+    end
+
+    test "includes group-based non-owner ACLs", %{
+      user: user,
+      other: other,
+      entity_type: etype
+    } do
+      entity_id = Ecto.UUID.generate()
+      {:ok, _} = Authorization.create_owner_acl(etype, entity_id, user.id)
+      {:ok, group} = Groups.create_group("Usage Query Group", user.id)
+      {:ok, _} = Groups.add_member(group.id, user.id, other.id)
+      {:ok, _} = Authorization.grant_group_access(etype, entity_id, user.id, group.id, "viewer")
+
+      query = Authorization.usage_accessible_entity_ids(etype, other.id)
+      ids = Repo.all(query)
+      assert entity_id in ids
+    end
+  end
+
   describe "can_edit?/3" do
     test "true for editor", %{user: user, other: other, entity_id: eid} do
       {:ok, _} = Authorization.create_owner_acl("wiki_space", eid, user.id)
@@ -539,24 +627,33 @@ defmodule Liteskill.AuthorizationTest do
       {:ok, conversation} =
         Liteskill.Chat.create_conversation(%{user_id: user.id, title: "Owned"})
 
-      assert :ok = Authorization.verify_ownership("conversation", conversation.id, user.id)
+      assert :ok =
+               Authorization.verify_ownership(
+                 Liteskill.Chat.Conversation,
+                 conversation.id,
+                 user.id
+               )
     end
 
     test "returns :error when user does not own a conversation", %{user: user, other: other} do
       {:ok, conversation} =
         Liteskill.Chat.create_conversation(%{user_id: user.id, title: "Not Mine"})
 
-      assert :error = Authorization.verify_ownership("conversation", conversation.id, other.id)
+      assert :error =
+               Authorization.verify_ownership(
+                 Liteskill.Chat.Conversation,
+                 conversation.id,
+                 other.id
+               )
     end
 
     test "returns :error for non-existent entity", %{user: user} do
       assert :error =
-               Authorization.verify_ownership("conversation", Ecto.UUID.generate(), user.id)
-    end
-
-    test "returns :error for unknown entity type", %{user: user} do
-      assert :error =
-               Authorization.verify_ownership("unknown_type", Ecto.UUID.generate(), user.id)
+               Authorization.verify_ownership(
+                 Liteskill.Chat.Conversation,
+                 Ecto.UUID.generate(),
+                 user.id
+               )
     end
 
     test "returns :ok when user owns an MCP server", %{user: user} do
@@ -567,7 +664,12 @@ defmodule Liteskill.AuthorizationTest do
           user_id: user.id
         })
 
-      assert :ok = Authorization.verify_ownership("mcp_server", server.id, user.id)
+      assert :ok =
+               Authorization.verify_ownership(
+                 Liteskill.McpServers.McpServer,
+                 server.id,
+                 user.id
+               )
     end
 
     test "returns :error when user does not own an MCP server", %{user: user, other: other} do
@@ -578,7 +680,92 @@ defmodule Liteskill.AuthorizationTest do
           user_id: user.id
         })
 
-      assert :error = Authorization.verify_ownership("mcp_server", server.id, other.id)
+      assert :error =
+               Authorization.verify_ownership(
+                 Liteskill.McpServers.McpServer,
+                 server.id,
+                 other.id
+               )
+    end
+  end
+
+  describe "agent grantee functions" do
+    setup %{user: user} do
+      {:ok, agent} =
+        Liteskill.Agents.create_agent(%{
+          name: "ACL Test Agent #{System.unique_integer([:positive])}",
+          strategy: "direct",
+          user_id: user.id
+        })
+
+      {:ok, server} =
+        Liteskill.McpServers.create_server(%{
+          name: "ACL Test Server #{System.unique_integer([:positive])}",
+          url: "https://acl-test.example.com",
+          user_id: user.id
+        })
+
+      %{agent: agent, server: server}
+    end
+
+    test "grant_agent_access creates agent ACL entry", %{agent: agent, server: server} do
+      assert {:ok, acl} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+      assert acl.entity_type == "mcp_server"
+      assert acl.entity_id == server.id
+      assert acl.agent_definition_id == agent.id
+      assert acl.role == "viewer"
+    end
+
+    test "grant_agent_access with custom role", %{agent: agent, server: server} do
+      assert {:ok, acl} =
+               Authorization.grant_agent_access("mcp_server", server.id, agent.id, "manager")
+
+      assert acl.role == "manager"
+    end
+
+    test "revoke_agent_access removes agent ACL entry", %{agent: agent, server: server} do
+      {:ok, _} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+      assert {:ok, _} = Authorization.revoke_agent_access("mcp_server", server.id, agent.id)
+    end
+
+    test "revoke_agent_access returns not_found when no entry exists", %{
+      agent: agent,
+      server: server
+    } do
+      assert {:error, :not_found} =
+               Authorization.revoke_agent_access("mcp_server", server.id, agent.id)
+    end
+
+    test "agent_accessible_entity_ids returns accessible IDs", %{
+      agent: agent,
+      server: server
+    } do
+      {:ok, _} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+
+      ids =
+        Authorization.agent_accessible_entity_ids("mcp_server", agent.id)
+        |> Liteskill.Repo.all()
+
+      assert server.id in ids
+    end
+
+    test "agent_accessible_entity_ids returns empty for no access", %{agent: agent} do
+      ids =
+        Authorization.agent_accessible_entity_ids("mcp_server", agent.id)
+        |> Liteskill.Repo.all()
+
+      assert ids == []
+    end
+
+    test "list_agent_acls returns all ACLs for an agent", %{agent: agent, server: server} do
+      {:ok, _} = Authorization.grant_agent_access("mcp_server", server.id, agent.id)
+      acls = Authorization.list_agent_acls("mcp_server", agent.id)
+      assert length(acls) == 1
+      assert hd(acls).entity_id == server.id
+    end
+
+    test "list_agent_acls returns empty when no ACLs exist", %{agent: agent} do
+      assert Authorization.list_agent_acls("mcp_server", agent.id) == []
     end
   end
 
@@ -609,7 +796,7 @@ defmodule Liteskill.AuthorizationTest do
       assert Keyword.has_key?(changeset.errors, :role)
     end
 
-    test "requires user_id or group_id" do
+    test "requires exactly one grantee" do
       changeset =
         EntityAcl.changeset(%EntityAcl{}, %{
           entity_type: "conversation",
@@ -627,6 +814,31 @@ defmodule Liteskill.AuthorizationTest do
           entity_id: Ecto.UUID.generate(),
           user_id: Ecto.UUID.generate(),
           group_id: Ecto.UUID.generate(),
+          role: "viewer"
+        })
+
+      refute changeset.valid?
+    end
+
+    test "accepts agent_definition_id as sole grantee" do
+      changeset =
+        EntityAcl.changeset(%EntityAcl{}, %{
+          entity_type: "mcp_server",
+          entity_id: Ecto.UUID.generate(),
+          agent_definition_id: Ecto.UUID.generate(),
+          role: "viewer"
+        })
+
+      assert changeset.valid?
+    end
+
+    test "rejects user_id and agent_definition_id together" do
+      changeset =
+        EntityAcl.changeset(%EntityAcl{}, %{
+          entity_type: "mcp_server",
+          entity_id: Ecto.UUID.generate(),
+          user_id: Ecto.UUID.generate(),
+          agent_definition_id: Ecto.UUID.generate(),
           role: "viewer"
         })
 

@@ -95,7 +95,7 @@ defmodule Liteskill.McpServersTest do
     test "fails without required user_id" do
       attrs = %{name: "Server", url: "https://mcp.example.com"}
 
-      assert {:error, %Ecto.Changeset{}} = McpServers.create_server(attrs)
+      assert {:error, :forbidden} = McpServers.create_server(attrs)
     end
 
     test "fails with invalid status", %{owner: owner} do
@@ -546,6 +546,165 @@ defmodule Liteskill.McpServersTest do
 
       refute changeset.valid?
       assert errors_on(changeset)[:url]
+    end
+
+    test "allows private URLs when allow_private_urls option is true" do
+      changeset =
+        McpServer.changeset(
+          %McpServer{},
+          %{
+            name: "Local Server",
+            url: "https://localhost:3000",
+            user_id: Ecto.UUID.generate()
+          },
+          allow_private_urls: true
+        )
+
+      assert changeset.valid?
+    end
+
+    test "allows 192.168.x URLs when allow_private_urls option is true" do
+      changeset =
+        McpServer.changeset(
+          %McpServer{},
+          %{
+            name: "Internal Server",
+            url: "https://192.168.1.100/mcp",
+            user_id: Ecto.UUID.generate()
+          },
+          allow_private_urls: true
+        )
+
+      assert changeset.valid?
+    end
+
+    test "allows plain HTTP when allow_private_urls is true" do
+      changeset =
+        McpServer.changeset(
+          %McpServer{},
+          %{
+            name: "Local Dev",
+            url: "http://localhost:3000",
+            user_id: Ecto.UUID.generate()
+          },
+          allow_private_urls: true
+        )
+
+      assert changeset.valid?
+    end
+
+    test "rejects plain HTTP when allow_private_urls is false" do
+      changeset =
+        McpServer.changeset(
+          %McpServer{},
+          %{
+            name: "S",
+            url: "http://example.com/mcp",
+            user_id: Ecto.UUID.generate()
+          }
+        )
+
+      refute changeset.valid?
+      assert errors_on(changeset)[:url]
+    end
+  end
+
+  describe "select_server/2" do
+    test "persists a selection", %{owner: owner} do
+      assert {:ok, _} = McpServers.select_server(owner.id, "builtin:reports")
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      assert MapSet.member?(selected, "builtin:reports")
+    end
+
+    test "is idempotent", %{owner: owner} do
+      assert {:ok, _} = McpServers.select_server(owner.id, "builtin:reports")
+      assert {:ok, _} = McpServers.select_server(owner.id, "builtin:reports")
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      assert MapSet.member?(selected, "builtin:reports")
+    end
+
+    test "persists DB-backed server selection", %{owner: owner} do
+      {:ok, server} =
+        McpServers.create_server(%{
+          name: "Sel Test",
+          url: "https://sel.example.com",
+          user_id: owner.id
+        })
+
+      assert {:ok, _} = McpServers.select_server(owner.id, server.id)
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      assert MapSet.member?(selected, server.id)
+    end
+  end
+
+  describe "deselect_server/2" do
+    test "removes a selection", %{owner: owner} do
+      McpServers.select_server(owner.id, "builtin:reports")
+      assert :ok = McpServers.deselect_server(owner.id, "builtin:reports")
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      refute MapSet.member?(selected, "builtin:reports")
+    end
+
+    test "is a no-op for non-existent selection", %{owner: owner} do
+      assert :ok = McpServers.deselect_server(owner.id, "builtin:nonexistent")
+    end
+  end
+
+  describe "clear_selected_servers/1" do
+    test "removes all selections for a user", %{owner: owner} do
+      McpServers.select_server(owner.id, "builtin:reports")
+      McpServers.select_server(owner.id, "builtin:wiki")
+
+      assert :ok = McpServers.clear_selected_servers(owner.id)
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      assert MapSet.size(selected) == 0
+    end
+  end
+
+  describe "load_selected_server_ids/1" do
+    test "returns empty MapSet for user with no selections", %{owner: owner} do
+      selected = McpServers.load_selected_server_ids(owner.id)
+      assert selected == MapSet.new()
+    end
+
+    test "returns MapSet of selected server IDs", %{owner: owner} do
+      McpServers.select_server(owner.id, "builtin:reports")
+      selected = McpServers.load_selected_server_ids(owner.id)
+      assert selected == MapSet.new(["builtin:reports"])
+    end
+
+    test "prunes stale selections for inaccessible servers", %{owner: owner} do
+      # Insert a selection for a server that doesn't exist
+      Liteskill.Repo.insert!(%Liteskill.McpServers.UserToolSelection{
+        user_id: owner.id,
+        server_id: Ecto.UUID.generate()
+      })
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      refute Enum.any?(selected, &(!String.starts_with?(&1, "builtin:")))
+
+      # Verify the stale row was pruned
+      count =
+        Liteskill.Repo.aggregate(
+          from(s in Liteskill.McpServers.UserToolSelection,
+            where: s.user_id == ^owner.id
+          ),
+          :count
+        )
+
+      assert count == 0
+    end
+
+    test "does not return other users' selections", %{owner: owner, other: other} do
+      McpServers.select_server(other.id, "builtin:reports")
+
+      selected = McpServers.load_selected_server_ids(owner.id)
+      refute MapSet.member?(selected, "builtin:reports")
     end
   end
 end

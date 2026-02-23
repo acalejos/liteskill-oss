@@ -6,7 +6,6 @@ defmodule LiteskillWeb.PipelineLive do
   use LiteskillWeb, :html
 
   alias Liteskill.Rag.Pipeline
-  alias Liteskill.Accounts.User
 
   @refresh_interval_ms 5_000
 
@@ -33,7 +32,7 @@ defmodule LiteskillWeb.PipelineLive do
 
   def apply_pipeline_action(socket, :pipeline, _params) do
     user = socket.assigns.current_user
-    is_admin = User.admin?(user)
+    is_admin = Liteskill.Rbac.has_permission?(user.id, "sources:manage_all")
     scope = :user
 
     socket

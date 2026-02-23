@@ -45,6 +45,7 @@ defmodule Liteskill.ReportsTest do
       assert {:ok, report} = Reports.create_report(owner.id, "My Report")
       assert report.title == "My Report"
       assert report.user_id == owner.id
+      assert report.run_id == nil
 
       acl =
         Repo.one!(
@@ -55,6 +56,18 @@ defmodule Liteskill.ReportsTest do
 
       assert acl.user_id == owner.id
       assert acl.role == "owner"
+    end
+
+    test "creates report with run_id when provided", %{owner: owner} do
+      {:ok, run} =
+        Liteskill.Runs.create_run(%{
+          name: "Test Run #{System.unique_integer([:positive])}",
+          prompt: "Test prompt",
+          user_id: owner.id
+        })
+
+      assert {:ok, report} = Reports.create_report(owner.id, "Run Report", run_id: run.id)
+      assert report.run_id == run.id
     end
   end
 
@@ -82,6 +95,61 @@ defmodule Liteskill.ReportsTest do
 
       reports = Reports.list_reports(other.id)
       assert reports == []
+    end
+  end
+
+  describe "list_reports_paginated/2" do
+    test "returns paginated results", %{owner: owner} do
+      for i <- 1..3, do: {:ok, _} = Reports.create_report(owner.id, "Report #{i}")
+
+      result = Reports.list_reports_paginated(owner.id, 1)
+      assert result.page == 1
+      assert result.total == 3
+      assert result.total_pages == 1
+      assert length(result.reports) == 3
+    end
+
+    test "returns empty page when no reports", %{other: other} do
+      result = Reports.list_reports_paginated(other.id, 1)
+      assert result.reports == []
+      assert result.total == 0
+      assert result.total_pages == 1
+    end
+
+    test "includes shared reports", %{owner: owner, other: other} do
+      {:ok, report} = Reports.create_report(owner.id, "Shared")
+      {:ok, _} = Reports.grant_access(report.id, owner.id, other.email)
+
+      result = Reports.list_reports_paginated(other.id, 1)
+      assert result.total == 1
+      assert hd(result.reports).id == report.id
+    end
+
+    test "preloads user and run associations", %{owner: owner} do
+      {:ok, _} = Reports.create_report(owner.id, "User Report")
+
+      {:ok, run} =
+        Liteskill.Runs.create_run(%{
+          name: "Test Run #{System.unique_integer([:positive])}",
+          prompt: "Test prompt",
+          user_id: owner.id
+        })
+
+      {:ok, _} = Reports.create_report(owner.id, "Run Report", run_id: run.id)
+
+      result = Reports.list_reports_paginated(owner.id, 1)
+
+      for report <- result.reports do
+        assert %Liteskill.Accounts.User{} = report.user
+        assert report.user.name == "Owner"
+      end
+
+      run_report = Enum.find(result.reports, &(&1.title == "Run Report"))
+      assert %Liteskill.Runs.Run{} = run_report.run
+      assert run_report.run.id == run.id
+
+      user_report = Enum.find(result.reports, &(&1.title == "User Report"))
+      assert user_report.run == nil
     end
   end
 

@@ -24,6 +24,7 @@ defmodule LiteskillWeb.McpComponents do
             </p>
           </div>
           <div class="flex items-center gap-1">
+            <span :if={!@builtin?} class="badge badge-sm badge-accent">MCP</span>
             <span :if={@builtin?} class="badge badge-sm badge-primary">built-in</span>
             <span class={[
               "badge badge-sm",
@@ -40,39 +41,45 @@ defmodule LiteskillWeb.McpComponents do
           <span class="badge badge-xs badge-info">global</span>
         </div>
         <div class="card-actions justify-end mt-2">
-          <button
-            phx-click="inspect_tools"
-            phx-value-id={@server.id}
-            class="btn btn-ghost btn-xs"
-          >
-            <.icon name="hero-code-bracket-micro" class="size-4" /> Tools
-          </button>
-          <button
-            :if={@owned && !@builtin?}
-            phx-click="open_sharing"
-            phx-value-entity-type="mcp_server"
-            phx-value-entity-id={@server.id}
-            class="btn btn-ghost btn-xs"
-          >
-            <.icon name="hero-share-micro" class="size-4" /> Share
-          </button>
-          <button
-            :if={@owned && !@builtin?}
-            phx-click="edit_mcp"
-            phx-value-id={@server.id}
-            class="btn btn-ghost btn-xs"
-          >
-            <.icon name="hero-pencil-square-micro" class="size-4" /> Edit
-          </button>
-          <button
-            :if={@owned && !@builtin?}
-            phx-click="delete_mcp"
-            phx-value-id={@server.id}
-            data-confirm="Delete this MCP server?"
-            class="btn btn-ghost btn-xs text-error"
-          >
-            <.icon name="hero-trash-micro" class="size-4" /> Delete
-          </button>
+          <div class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-ghost btn-xs gap-1">
+              <.icon name="hero-ellipsis-horizontal-micro" class="size-4" /> Actions
+            </div>
+            <ul
+              tabindex="0"
+              class="dropdown-content menu menu-sm bg-base-200 rounded-lg shadow-lg z-10 w-40 p-1"
+            >
+              <li>
+                <button phx-click="inspect_tools" phx-value-id={@server.id}>
+                  <.icon name="hero-code-bracket-micro" class="size-4" /> Tools
+                </button>
+              </li>
+              <li :if={@owned && !@builtin?}>
+                <button
+                  phx-click="open_sharing"
+                  phx-value-entity-type="mcp_server"
+                  phx-value-entity-id={@server.id}
+                >
+                  <.icon name="hero-share-micro" class="size-4" /> Share
+                </button>
+              </li>
+              <li :if={@owned && !@builtin?}>
+                <button phx-click="edit_mcp" phx-value-id={@server.id}>
+                  <.icon name="hero-pencil-square-micro" class="size-4" /> Edit
+                </button>
+              </li>
+              <li :if={@owned && !@builtin?}>
+                <button
+                  phx-click="delete_mcp"
+                  phx-value-id={@server.id}
+                  data-confirm="Delete this server?"
+                  class="text-error"
+                >
+                  <.icon name="hero-trash-micro" class="size-4" /> Delete
+                </button>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
@@ -93,7 +100,13 @@ defmodule LiteskillWeb.McpComponents do
       |> Enum.group_by(& &1.server_id)
       |> Enum.map(fn {server_id, tools} ->
         first = hd(tools)
-        %{id: server_id, name: first.server_name, tool_count: length(tools)}
+
+        %{
+          id: server_id,
+          name: first.server_name,
+          tool_count: length(tools),
+          source: Map.get(first, :source, :builtin)
+        }
       end)
 
     assigns =
@@ -112,7 +125,7 @@ defmodule LiteskillWeb.McpComponents do
           if(@selected_count > 0, do: "text-primary", else: "text-base-content/50")
         ]}
       >
-        <.icon name="hero-server-stack-micro" class="size-4" />
+        <.icon name="hero-wrench-screwdriver-micro" class="size-4" />
         <span :if={@selected_count > 0} class="badge badge-primary badge-xs">
           {@selected_count}
         </span>
@@ -127,7 +140,7 @@ defmodule LiteskillWeb.McpComponents do
         phx-click-away={"#{@prefix}toggle_tool_picker"}
       >
         <div class="p-3 border-b border-base-300 flex items-center justify-between">
-          <span class="text-sm font-semibold">MCP Servers</span>
+          <span class="text-sm font-semibold">Tool Servers</span>
           <button
             :if={@selected_count > 0}
             type="button"
@@ -146,7 +159,7 @@ defmodule LiteskillWeb.McpComponents do
           :if={!@tools_loading && @servers == []}
           class="p-4 text-center text-sm text-base-content/50"
         >
-          <p>No MCP servers found</p>
+          <p>No tool servers found</p>
           <button
             type="button"
             phx-click={"#{@prefix}refresh_tools"}
@@ -170,7 +183,10 @@ defmodule LiteskillWeb.McpComponents do
                 class="checkbox checkbox-sm checkbox-primary"
               />
               <div class="flex-1 min-w-0">
-                <div class="text-sm font-medium truncate">{server.name}</div>
+                <div class="text-sm font-medium truncate flex items-center gap-1">
+                  {server.name}
+                  <span :if={server.source == :mcp} class="badge badge-xs badge-accent">MCP</span>
+                </div>
                 <div class="text-xs text-base-content/60">
                   {server.tool_count} {if server.tool_count == 1, do: "tool", else: "tools"}
                 </div>
@@ -546,7 +562,10 @@ defmodule LiteskillWeb.McpComponents do
       |> Enum.filter(fn {server_id, _} ->
         MapSet.member?(assigns.selected_server_ids, server_id)
       end)
-      |> Enum.map(fn {server_id, tools} -> %{id: server_id, name: hd(tools).server_name} end)
+      |> Enum.map(fn {server_id, tools} ->
+        first = hd(tools)
+        %{id: server_id, name: first.server_name, source: Map.get(first, :source, :builtin)}
+      end)
 
     assigns = assign(assigns, selected_servers: selected_servers)
 
@@ -557,6 +576,7 @@ defmodule LiteskillWeb.McpComponents do
         class="badge badge-sm badge-outline badge-primary gap-1"
       >
         {server.name}
+        <span :if={server.source == :mcp} class="badge badge-xs badge-accent">MCP</span>
         <button
           type="button"
           phx-click={"#{@prefix}toggle_server"}

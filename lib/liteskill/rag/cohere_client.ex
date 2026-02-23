@@ -8,6 +8,8 @@ defmodule Liteskill.Rag.CohereClient do
   alias Liteskill.Rag.EmbeddingRequest
   alias Liteskill.Repo
 
+  require Logger
+
   @embed_model "us.cohere.embed-v4:0"
   @rerank_model "cohere.rerank-v3-5:0"
 
@@ -25,7 +27,10 @@ defmodule Liteskill.Rag.CohereClient do
   """
   def embed(texts, opts \\ []) do
     {user_id, opts} = Keyword.pop(opts, :user_id)
+    {model_override, opts} = Keyword.pop(opts, :model_id)
     {req_opts, body_opts} = Keyword.split(opts, [:plug])
+
+    model_id = model_override || resolve_embed_model()
 
     body = %{
       "texts" => texts,
@@ -38,7 +43,7 @@ defmodule Liteskill.Rag.CohereClient do
     start = System.monotonic_time(:millisecond)
 
     result =
-      case Req.post(base_req(), [{:url, invoke_url(@embed_model)}, {:json, body}] ++ req_opts) do
+      case Req.post(base_req(), [{:url, invoke_url(model_id)}, {:json, body}] ++ req_opts) do
         {:ok, %{status: 200, body: %{"embeddings" => %{"float" => embeddings}}}} ->
           {:ok, embeddings}
 
@@ -54,7 +59,7 @@ defmodule Liteskill.Rag.CohereClient do
 
     log_request(user_id, %{
       request_type: "embed",
-      model_id: @embed_model,
+      model_id: model_id,
       input_count: length(texts),
       token_count: estimate_token_count(texts),
       latency_ms: latency,
@@ -114,8 +119,15 @@ defmodule Liteskill.Rag.CohereClient do
     result
   end
 
+  defp resolve_embed_model do
+    case Liteskill.Settings.get() do
+      %{embedding_model: %{model_id: mid}} when is_binary(mid) -> mid
+      _ -> @embed_model
+    end
+  end
+
   defp base_req do
-    token = config(:bedrock_bearer_token)
+    %{token: token} = resolve_credentials()
 
     Req.new(
       headers: [
@@ -127,13 +139,34 @@ defmodule Liteskill.Rag.CohereClient do
   end
 
   defp invoke_url(model_id) do
-    region = config(:bedrock_region)
+    %{region: region} = resolve_credentials()
     "https://bedrock-runtime.#{region}.amazonaws.com/model/#{URI.encode(model_id)}/invoke"
   end
 
-  defp config(key) do
-    Application.get_env(:liteskill, Liteskill.LLM, [])
-    |> Keyword.get(key)
+  defp resolve_credentials do
+    db_creds =
+      try do
+        Liteskill.LlmProviders.get_bedrock_credentials()
+      rescue
+        # coveralls-ignore-start
+        e ->
+          Logger.warning("Failed to resolve DB credentials: #{Exception.message(e)}")
+          nil
+          # coveralls-ignore-stop
+      end
+
+    case db_creds do
+      %{api_key: token, region: region} ->
+        %{token: token, region: region}
+
+      nil ->
+        config = Application.get_env(:liteskill, Liteskill.LLM, [])
+
+        %{
+          token: Keyword.get(config, :bedrock_bearer_token),
+          region: Keyword.get(config, :bedrock_region, "us-east-1")
+        }
+    end
   end
 
   defp log_request(nil, _attrs), do: :ok

@@ -79,7 +79,41 @@ defmodule LiteskillWeb.Telemetry do
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),
       summary("vm.total_run_queue_lengths.cpu"),
-      summary("vm.total_run_queue_lengths.io")
+      summary("vm.total_run_queue_lengths.io"),
+
+      # LLM Gateway Metrics
+      counter("liteskill.llm_gateway.rate_limited.count",
+        tags: [:user_id, :model_id],
+        description: "LLM requests rejected by token bucket rate limiter"
+      ),
+      counter("liteskill.llm_gateway.checkout.count",
+        tags: [:provider_id, :circuit_state],
+        description: "LLM gateway checkout attempts"
+      ),
+      counter("liteskill.llm_gateway.checkin.count",
+        tags: [:provider_id, :result],
+        description: "LLM gateway checkin completions"
+      ),
+      counter("liteskill.llm_gateway.circuit_opened.count",
+        tags: [:provider_id, :reason],
+        description: "Circuit breaker opened events"
+      ),
+      counter("liteskill.llm_gateway.circuit_closed.count",
+        tags: [:provider_id],
+        description: "Circuit breaker closed events"
+      ),
+      counter("liteskill.llm_gateway.concurrency_limited.count",
+        tags: [:provider_id, :reason],
+        description: "LLM requests rejected by concurrency cap"
+      ),
+      counter("liteskill.llm.retry.count",
+        tags: [:stream_id, :attempt, :error_label],
+        description: "LLM streaming retries"
+      ),
+      counter("liteskill.llm.call_failed.count",
+        tags: [:stream_id],
+        description: "LLM streaming calls that failed permanently"
+      )
     ]
   end
 

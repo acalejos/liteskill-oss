@@ -1,4 +1,9 @@
 defmodule Liteskill.Reports do
+  use Boundary,
+    top_level?: true,
+    deps: [Liteskill.Accounts, Liteskill.Authorization, Liteskill.Rbac],
+    exports: [Report, ReportSection, SectionComment]
+
   @moduledoc """
   Context for managing reports and their nested sections.
 
@@ -25,17 +30,25 @@ defmodule Liteskill.Reports do
 
   # --- Reports CRUD ---
 
-  def create_report(user_id, title) do
-    Repo.transaction(fn ->
-      report =
-        %Report{}
-        |> Report.changeset(%{title: title, user_id: user_id})
-        |> Repo.insert!()
+  def create_report(user_id, title, opts \\ []) do
+    with :ok <- Liteskill.Rbac.authorize(user_id, "reports:create") do
+      run_id = Keyword.get(opts, :run_id)
 
-      {:ok, _} = Authorization.create_owner_acl("report", report.id, user_id)
+      attrs =
+        %{title: title, user_id: user_id}
+        |> then(fn a -> if run_id, do: Map.put(a, :run_id, run_id), else: a end)
 
-      report
-    end)
+      Repo.transaction(fn ->
+        report =
+          %Report{}
+          |> Report.changeset(attrs)
+          |> Repo.insert!()
+
+        {:ok, _} = Authorization.create_owner_acl("report", report.id, user_id)
+
+        report
+      end)
+    end
   end
 
   def list_reports(user_id) do
@@ -45,6 +58,29 @@ defmodule Liteskill.Reports do
     |> where([r], r.user_id == ^user_id or r.id in subquery(accessible_ids))
     |> order_by([r], desc: r.updated_at)
     |> Repo.all()
+  end
+
+  @reports_per_page 20
+
+  def list_reports_paginated(user_id, page) when is_integer(page) and page >= 1 do
+    accessible_ids = Authorization.accessible_entity_ids("report", user_id)
+
+    base_query =
+      Report
+      |> where([r], r.user_id == ^user_id or r.id in subquery(accessible_ids))
+
+    total = Repo.aggregate(base_query, :count)
+    total_pages = max(ceil(total / @reports_per_page), 1)
+
+    reports =
+      base_query
+      |> order_by([r], desc: r.updated_at)
+      |> limit(@reports_per_page)
+      |> offset(^(@reports_per_page * (page - 1)))
+      |> Repo.all()
+      |> Repo.preload([:user, run: :team_definition])
+
+    %{reports: reports, page: page, total_pages: total_pages, total: total}
   end
 
   def get_report(report_id, user_id) do

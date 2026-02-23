@@ -1,54 +1,220 @@
 defmodule LiteskillWeb.SetupLive do
   use LiteskillWeb, :live_view
 
+  import LiteskillWeb.ErrorHelpers
+
   alias Liteskill.Accounts
   alias Liteskill.DataSources
+  alias Liteskill.LlmModels
+  alias Liteskill.LlmModels.LlmModel
+  alias Liteskill.LlmProviders
+  alias Liteskill.LlmProviders.LlmProvider
+  alias Liteskill.OpenRouter
+  alias Liteskill.Rbac
+  alias Liteskill.Settings
+  alias Liteskill.SingleUser
+  alias LiteskillWeb.AdminLive
+  alias LiteskillWeb.OpenRouterController
   alias LiteskillWeb.SourcesComponents
 
   @impl true
   def mount(_params, _session, socket) do
+    mode = if SingleUser.enabled?(), do: :single_user, else: :server
+    steps = compute_steps(mode)
+
     {:ok,
      socket
      |> assign(
        page_title: "Initial Setup",
-       step: :password,
+       mode: mode,
+       steps: steps,
+       step: hd(steps),
        form: to_form(%{"password" => "", "password_confirmation" => ""}, as: :setup),
        error: nil,
+       selected_permissions: MapSet.new(Rbac.Permissions.default_permissions()),
        data_sources: DataSources.available_source_types(),
        selected_sources: MapSet.new(),
        sources_to_configure: [],
        current_config_index: 0,
-       config_form: to_form(%{}, as: :config)
+       config_form: to_form(%{}, as: :config),
+       llm_providers: LlmProviders.list_all_providers(),
+       llm_models: LlmModels.list_all_models(),
+       llm_provider_form: to_form(%{}, as: :llm_provider),
+       llm_model_form: to_form(%{}, as: :llm_model),
+       provider_view: :presets,
+       openrouter_pending: false,
+       rag_embedding_models: LlmModels.list_all_active_models(model_type: "embedding"),
+       rag_current_model: Settings.get().embedding_model
      ), layout: {LiteskillWeb.Layouts, :root}}
+  end
+
+  defp compute_steps(:single_user) do
+    steps = [:welcome]
+    steps = if LlmProviders.list_all_providers() == [], do: steps ++ [:providers], else: steps
+    steps = if LlmModels.list_all_models() == [], do: steps ++ [:models], else: steps
+    steps = if Settings.embedding_enabled?(), do: steps, else: steps ++ [:rag]
+
+    # Always include at least welcome + one step so the wizard has something to do
+    if steps == [:welcome], do: [:welcome], else: steps
+  end
+
+  defp compute_steps(:server) do
+    [:password, :default_permissions, :providers, :models, :rag, :data_sources]
   end
 
   @impl true
   def render(assigns) do
     ~H"""
     <div class="min-h-screen flex items-center justify-center bg-base-200 px-4">
-      <%= cond do %>
-        <% @step == :password -> %>
-          <.password_step form={@form} error={@error} />
-        <% @step == :data_sources -> %>
-          <.data_sources_step
-            data_sources={@data_sources}
-            selected_sources={@selected_sources}
+      <div class="w-full max-w-2xl">
+        <div :if={length(@steps) > 1} class="flex gap-2 mb-6">
+          <.step_indicator
+            :for={{s, idx} <- Enum.with_index(@steps, 1)}
+            label={step_label(s)}
+            step={s}
+            current={@step}
+            index={idx}
+            total={length(@steps)}
+            steps={@steps}
           />
-        <% @step == :configure_source -> %>
-          <.configure_source_step
-            source={Enum.at(@sources_to_configure, @current_config_index)}
-            config_fields={config_fields_for(Enum.at(@sources_to_configure, @current_config_index))}
-            config_form={@config_form}
-            current_index={@current_config_index}
-            total={length(@sources_to_configure)}
-          />
-      <% end %>
+        </div>
+
+        <%= case @step do %>
+          <% :welcome -> %>
+            <.welcome_step />
+          <% :password -> %>
+            <.password_step form={@form} error={@error} />
+          <% :default_permissions -> %>
+            <.default_permissions_step selected_permissions={@selected_permissions} />
+          <% :providers -> %>
+            <.providers_step
+              llm_providers={@llm_providers}
+              llm_provider_form={@llm_provider_form}
+              provider_view={@provider_view}
+              openrouter_pending={@openrouter_pending}
+              error={@error}
+            />
+          <% :models -> %>
+            <.models_step
+              llm_models={@llm_models}
+              llm_providers={@llm_providers}
+              llm_model_form={@llm_model_form}
+              error={@error}
+            />
+          <% :rag -> %>
+            <.rag_step
+              rag_embedding_models={@rag_embedding_models}
+              rag_current_model={@rag_current_model}
+              error={@error}
+            />
+          <% :data_sources -> %>
+            <.data_sources_step
+              data_sources={@data_sources}
+              selected_sources={@selected_sources}
+            />
+          <% :configure_source -> %>
+            <.configure_source_step
+              source={Enum.at(@sources_to_configure, @current_config_index)}
+              config_fields={config_fields_for(Enum.at(@sources_to_configure, @current_config_index))}
+              config_form={@config_form}
+              current_index={@current_config_index}
+              total={length(@sources_to_configure)}
+            />
+        <% end %>
+      </div>
     </div>
     """
   end
 
-  defp config_fields_for(source) do
-    DataSources.config_fields_for(source.source_type)
+  # --- Step indicator ---
+
+  defp step_label(:welcome), do: "Welcome"
+  defp step_label(:password), do: "Password"
+  defp step_label(:default_permissions), do: "Permissions"
+  defp step_label(:providers), do: "Providers"
+  defp step_label(:models), do: "Models"
+  defp step_label(:rag), do: "RAG"
+  defp step_label(:data_sources), do: "Data Sources"
+  defp step_label(:configure_source), do: "Configure"
+
+  attr :label, :string, required: true
+  attr :step, :atom, required: true
+  attr :current, :atom, required: true
+  attr :index, :integer, required: true
+  attr :total, :integer, required: true
+  attr :steps, :list, required: true
+
+  defp step_indicator(assigns) do
+    current_idx = Enum.find_index(assigns.steps, &(&1 == assigns.current)) || 0
+    step_idx = Enum.find_index(assigns.steps, &(&1 == assigns.step)) || 0
+
+    status =
+      cond do
+        assigns.step == assigns.current -> :active
+        step_idx < current_idx -> :done
+        true -> :pending
+      end
+
+    assigns = assign(assigns, :status, status)
+
+    ~H"""
+    <div class="flex items-center gap-2 flex-1">
+      <div class={[
+        "size-6 rounded-full flex items-center justify-center text-xs font-bold",
+        case @status do
+          :done -> "bg-success text-success-content"
+          :active -> "bg-primary text-primary-content"
+          :pending -> "bg-base-300 text-base-content/50"
+        end
+      ]}>
+        <%= if @status == :done do %>
+          <.icon name="hero-check-micro" class="size-4" />
+        <% else %>
+          {@index}
+        <% end %>
+      </div>
+      <span class={[
+        "text-sm font-medium",
+        if(@status == :pending, do: "text-base-content/50", else: "text-base-content")
+      ]}>
+        {@label}
+      </span>
+      <div :if={@index < @total} class="flex-1 h-px bg-base-300" />
+    </div>
+    """
+  end
+
+  # --- Step components ---
+
+  defp welcome_step(assigns) do
+    ~H"""
+    <div class="card bg-base-100 shadow-xl w-full max-w-md mx-auto">
+      <div class="card-body items-center text-center">
+        <img
+          src={~p"/images/logo_light_mode.svg"}
+          alt="Liteskill"
+          class="h-16 w-16 mb-2 dark:hidden"
+        />
+        <img
+          src={~p"/images/logo_dark_mode.svg"}
+          alt="Liteskill"
+          class="h-16 w-16 mb-2 hidden dark:block"
+        />
+        <h2 class="card-title text-2xl">Welcome to Liteskill</h2>
+        <p class="text-base-content/70 mt-2">
+          Let's get your instance configured. We'll walk you through setting up
+          LLM providers, models, and RAG embedding so you can start chatting.
+        </p>
+        <button
+          type="button"
+          phx-click="welcome_continue"
+          class="btn btn-primary w-full mt-6"
+        >
+          Get Started
+        </button>
+      </div>
+    </div>
+    """
   end
 
   attr :form, :any, required: true
@@ -56,7 +222,7 @@ defmodule LiteskillWeb.SetupLive do
 
   defp password_step(assigns) do
     ~H"""
-    <div class="card bg-base-100 shadow-xl w-full max-w-md">
+    <div class="card bg-base-100 shadow-xl w-full max-w-md mx-auto">
       <div class="card-body">
         <h2 class="card-title text-2xl">Welcome to Liteskill</h2>
         <p class="text-base-content/70">
@@ -99,12 +265,443 @@ defmodule LiteskillWeb.SetupLive do
     """
   end
 
+  attr :selected_permissions, :any, required: true
+
+  defp default_permissions_step(assigns) do
+    grouped = Rbac.Permissions.grouped()
+    assigns = assign(assigns, :grouped_permissions, grouped)
+
+    ~H"""
+    <div class="card bg-base-100 shadow-xl w-full max-w-2xl mx-auto">
+      <div class="card-body">
+        <h2 class="card-title text-2xl">Default User Permissions</h2>
+        <p class="text-base-content/70">
+          Choose the baseline permissions that all users receive by default.
+          You can always change this later in Admin &gt; Roles.
+        </p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <%= for {category, perms} <- @grouped_permissions do %>
+            <div class="border border-base-300 rounded-lg p-3">
+              <h4 class="font-semibold text-sm mb-2 capitalize">{category}</h4>
+              <%= for perm <- perms do %>
+                <label class="flex items-center gap-2 py-0.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    phx-click="toggle_permission"
+                    phx-value-permission={perm}
+                    checked={MapSet.member?(@selected_permissions, perm)}
+                    class="checkbox checkbox-sm"
+                  />
+                  <span class="text-xs">{perm}</span>
+                </label>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+
+        <div class="flex gap-3 mt-8">
+          <button type="button" phx-click="skip_permissions" class="btn btn-ghost flex-1">
+            Skip
+          </button>
+          <button type="button" phx-click="save_permissions" class="btn btn-primary flex-1">
+            Save & Continue
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :llm_providers, :list, required: true
+  attr :llm_provider_form, :any, required: true
+  attr :provider_view, :atom, required: true
+  attr :openrouter_pending, :boolean, required: true
+  attr :error, :string
+
+  defp providers_step(%{provider_view: :presets} = assigns) do
+    ~H"""
+    <div
+      id="setup-providers-presets"
+      phx-hook="OpenExternalUrl"
+      class="card bg-base-100 shadow-xl w-full max-w-2xl mx-auto"
+    >
+      <div class="card-body">
+        <h2 class="card-title text-2xl">Configure LLM Providers</h2>
+        <p class="text-base-content/70">
+          Add at least one LLM provider to enable AI chat.
+        </p>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-6">
+          <button
+            type="button"
+            disabled
+            class="flex flex-col items-center gap-3 p-6 rounded-xl border-2 border-base-300 opacity-50 cursor-not-allowed"
+          >
+            <span class="text-2xl font-bold">OpenAI</span>
+            <span class="text-sm text-base-content/60">GPT-4o, o1, and more</span>
+            <span class="badge badge-ghost badge-sm">Coming Soon</span>
+          </button>
+
+          <button
+            type="button"
+            phx-click="openrouter_connect"
+            disabled={@openrouter_pending}
+            class={[
+              "flex flex-col items-center gap-3 p-6 rounded-xl border-2 transition-all",
+              if(@openrouter_pending,
+                do: "border-primary/30 bg-primary/5 opacity-70 cursor-wait",
+                else:
+                  "border-primary/30 bg-primary/5 hover:border-primary hover:bg-primary/10 cursor-pointer"
+              )
+            ]}
+          >
+            <span class="text-2xl font-bold">OpenRouter</span>
+            <span class="text-sm text-base-content/60">Access 200+ models</span>
+            <%= if @openrouter_pending do %>
+              <span class="badge badge-primary badge-sm gap-1">
+                <span class="loading loading-spinner loading-xs"></span> Waiting for authorization...
+              </span>
+            <% else %>
+              <span class="badge badge-primary badge-sm">Connect</span>
+            <% end %>
+          </button>
+        </div>
+
+        <div :if={@llm_providers != []} class="mt-4">
+          <h4 class="font-semibold text-sm mb-2">Configured Providers</h4>
+          <div class="space-y-1">
+            <div
+              :for={p <- @llm_providers}
+              class="flex items-center justify-between p-2 bg-base-200 rounded"
+            >
+              <div class="flex items-center gap-2">
+                <span class="badge badge-success badge-xs" />
+                <span class="text-sm font-medium">{p.name}</span>
+                <span class="text-xs text-base-content/50">{p.provider_type}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-3 mt-6">
+          <button
+            type="button"
+            phx-click="setup_providers_show_custom"
+            class="btn btn-outline btn-sm w-full"
+          >
+            Other Provider
+          </button>
+          <div class="flex gap-3">
+            <button type="button" phx-click="setup_providers_skip" class="btn btn-ghost flex-1">
+              Skip
+            </button>
+            <button
+              type="button"
+              phx-click="setup_providers_continue"
+              class="btn btn-primary flex-1"
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp providers_step(%{provider_view: :custom} = assigns) do
+    provider_types = LlmProvider.valid_provider_types()
+    assigns = assign(assigns, :provider_types, provider_types)
+
+    ~H"""
+    <div class="card bg-base-100 shadow-xl w-full max-w-2xl mx-auto">
+      <div class="card-body">
+        <div class="flex items-center gap-2 mb-2">
+          <button type="button" phx-click="setup_providers_show_presets" class="btn btn-ghost btn-sm">
+            <.icon name="hero-arrow-left-micro" class="size-4" /> Back
+          </button>
+          <h2 class="card-title text-2xl">Add Custom Provider</h2>
+        </div>
+        <p class="text-base-content/70">
+          Configure any provider supported by ReqLLM (AWS Bedrock, Anthropic, Google, etc).
+        </p>
+
+        <div class="mt-4 p-4 border border-base-300 rounded-lg">
+          <.form for={@llm_provider_form} phx-submit="setup_create_provider" class="space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="form-control">
+                <label class="label"><span class="label-text">Name</span></label>
+                <input
+                  type="text"
+                  name="llm_provider[name]"
+                  class="input input-bordered input-sm w-full"
+                  required
+                  placeholder="AWS Bedrock US-East"
+                />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Provider Type</span></label>
+                <select
+                  name="llm_provider[provider_type]"
+                  class="select select-bordered select-sm w-full"
+                >
+                  <%= for pt <- @provider_types do %>
+                    <option value={pt}>{pt}</option>
+                  <% end %>
+                </select>
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">API Key</span></label>
+                <input
+                  type="password"
+                  name="llm_provider[api_key]"
+                  class="input input-bordered input-sm w-full"
+                  placeholder="Optional — encrypted at rest"
+                />
+              </div>
+            </div>
+            <div class="form-control">
+              <label class="label">
+                <span class="label-text">Provider Config (JSON)</span>
+              </label>
+              <textarea
+                name="llm_provider[provider_config_json]"
+                class="textarea textarea-bordered textarea-sm w-full font-mono"
+                rows="2"
+                placeholder='{"region": "us-east-1"}'
+              />
+            </div>
+            <label class="label cursor-pointer gap-2 w-fit">
+              <input
+                type="checkbox"
+                name="llm_provider[instance_wide]"
+                value="true"
+                checked
+                class="checkbox checkbox-sm"
+              />
+              <span class="label-text">Instance-wide (all users)</span>
+            </label>
+            <p :if={@error} class="text-error text-sm">{@error}</p>
+            <button type="submit" class="btn btn-primary btn-sm">Add Provider</button>
+          </.form>
+        </div>
+
+        <div :if={@llm_providers != []} class="mt-4">
+          <h4 class="font-semibold text-sm mb-2">Configured Providers</h4>
+          <div class="space-y-1">
+            <div
+              :for={p <- @llm_providers}
+              class="flex items-center justify-between p-2 bg-base-200 rounded"
+            >
+              <div class="flex items-center gap-2">
+                <span class="badge badge-success badge-xs" />
+                <span class="text-sm font-medium">{p.name}</span>
+                <span class="text-xs text-base-content/50">{p.provider_type}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex gap-3 mt-6">
+          <button type="button" phx-click="setup_providers_skip" class="btn btn-ghost flex-1">
+            Skip
+          </button>
+          <button type="button" phx-click="setup_providers_continue" class="btn btn-primary flex-1">
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :llm_models, :list, required: true
+  attr :llm_providers, :list, required: true
+  attr :llm_model_form, :any, required: true
+  attr :error, :string
+
+  defp models_step(assigns) do
+    model_types = LlmModel.valid_model_types()
+    assigns = assign(assigns, :model_types, model_types)
+
+    ~H"""
+    <div class="card bg-base-100 shadow-xl w-full max-w-2xl mx-auto">
+      <div class="card-body">
+        <h2 class="card-title text-2xl">Configure LLM Models</h2>
+        <p class="text-base-content/70">
+          Add models that users can chat with. You'll need at least one inference model,
+          and an embedding model if you want RAG.
+        </p>
+
+        <%= if @llm_providers == [] do %>
+          <div class="alert alert-warning mt-4">
+            <.icon name="hero-exclamation-triangle-micro" class="size-5" />
+            <span>No providers configured. Go back and add a provider first, or skip for now.</span>
+          </div>
+        <% else %>
+          <div class="mt-4 p-4 border border-base-300 rounded-lg">
+            <h3 class="font-semibold mb-3">Add Model</h3>
+            <.form for={@llm_model_form} phx-submit="setup_create_model" class="space-y-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Display Name</span></label>
+                  <input
+                    type="text"
+                    name="llm_model[name]"
+                    class="input input-bordered input-sm w-full"
+                    required
+                    placeholder="Claude Sonnet"
+                  />
+                </div>
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Provider</span></label>
+                  <select
+                    name="llm_model[provider_id]"
+                    class="select select-bordered select-sm w-full"
+                    required
+                  >
+                    <%= for p <- @llm_providers do %>
+                      <option value={p.id}>{p.name}</option>
+                    <% end %>
+                  </select>
+                </div>
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Model ID</span></label>
+                  <input
+                    type="text"
+                    name="llm_model[model_id]"
+                    class="input input-bordered input-sm w-full"
+                    required
+                    placeholder="us.anthropic.claude-sonnet-4-20250514"
+                  />
+                </div>
+                <div class="form-control">
+                  <label class="label"><span class="label-text">Model Type</span></label>
+                  <select
+                    name="llm_model[model_type]"
+                    class="select select-bordered select-sm w-full"
+                  >
+                    <%= for mt <- @model_types do %>
+                      <option value={mt}>{mt}</option>
+                    <% end %>
+                  </select>
+                </div>
+              </div>
+              <label class="label cursor-pointer gap-2 w-fit">
+                <input
+                  type="checkbox"
+                  name="llm_model[instance_wide]"
+                  value="true"
+                  checked
+                  class="checkbox checkbox-sm"
+                />
+                <span class="label-text">Instance-wide (all users)</span>
+              </label>
+              <p :if={@error} class="text-error text-sm">{@error}</p>
+              <button type="submit" class="btn btn-primary btn-sm">Add Model</button>
+            </.form>
+          </div>
+        <% end %>
+
+        <div :if={@llm_models != []} class="mt-4">
+          <h4 class="font-semibold text-sm mb-2">Configured Models</h4>
+          <div class="space-y-1">
+            <div
+              :for={m <- @llm_models}
+              class="flex items-center justify-between p-2 bg-base-200 rounded"
+            >
+              <div class="flex items-center gap-2">
+                <span class="badge badge-success badge-xs" />
+                <span class="text-sm font-medium">{m.name}</span>
+                <span class="text-xs text-base-content/50">{m.model_id}</span>
+                <span class="badge badge-ghost badge-xs">{m.model_type}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex gap-3 mt-6">
+          <button type="button" phx-click="setup_models_skip" class="btn btn-ghost flex-1">
+            Skip
+          </button>
+          <button type="button" phx-click="setup_models_continue" class="btn btn-primary flex-1">
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :rag_embedding_models, :list, required: true
+  attr :rag_current_model, :any
+  attr :error, :string
+
+  defp rag_step(assigns) do
+    ~H"""
+    <div class="card bg-base-100 shadow-xl w-full max-w-2xl mx-auto">
+      <div class="card-body">
+        <h2 class="card-title text-2xl">RAG Embedding Model</h2>
+        <p class="text-base-content/70">
+          Select an embedding model to enable Retrieval-Augmented Generation (RAG).
+          This powers document search and knowledge-base features.
+        </p>
+
+        <%= if @rag_current_model do %>
+          <div class="flex items-center gap-2 mt-4">
+            <span class="badge badge-success">Active</span>
+            <span class="font-medium">{@rag_current_model.name}</span>
+            <span class="text-sm text-base-content/60">({@rag_current_model.model_id})</span>
+          </div>
+        <% end %>
+
+        <%= if @rag_embedding_models == [] do %>
+          <div class="alert alert-info mt-4">
+            <.icon name="hero-information-circle-micro" class="size-5" />
+            <span>
+              No embedding models available. Add a model with type "embedding" in the previous step,
+              or skip for now and configure later in Settings.
+            </span>
+          </div>
+        <% else %>
+          <form phx-submit="setup_select_embedding" class="mt-4">
+            <div class="form-control">
+              <label class="label"><span class="label-text">Select Embedding Model</span></label>
+              <select name="model_id" class="select select-bordered w-full">
+                <option value="">-- None (disable RAG) --</option>
+                <option
+                  :for={model <- @rag_embedding_models}
+                  value={model.id}
+                  selected={@rag_current_model && model.id == @rag_current_model.id}
+                >
+                  {model.name} ({model.model_id})
+                </option>
+              </select>
+            </div>
+            <p :if={@error} class="text-error text-sm mt-2">{@error}</p>
+            <button type="submit" class="btn btn-primary mt-4">
+              Save & Continue
+            </button>
+          </form>
+        <% end %>
+
+        <div class="flex gap-3 mt-6">
+          <button type="button" phx-click="setup_rag_skip" class="btn btn-ghost flex-1">
+            Skip for now
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   attr :data_sources, :list, required: true
   attr :selected_sources, :any, required: true
 
   defp data_sources_step(assigns) do
     ~H"""
-    <div class="card bg-base-100 shadow-xl w-full max-w-2xl">
+    <div class="card bg-base-100 shadow-xl w-full max-w-2xl mx-auto">
       <div class="card-body">
         <h2 class="card-title text-2xl">Connect Your Data Sources</h2>
         <p class="text-base-content/70">
@@ -112,39 +709,48 @@ defmodule LiteskillWeb.SetupLive do
         </p>
 
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-6">
-          <button
-            :for={source <- @data_sources}
-            type="button"
-            phx-click="toggle_source"
-            phx-value-source-type={source.source_type}
-            class={[
-              "flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 transition-all duration-200 cursor-pointer",
-              if(MapSet.member?(@selected_sources, source.source_type),
-                do: "bg-success/15 border-success shadow-md",
-                else: "bg-base-100 border-base-300 hover:border-base-content/30"
-              ),
-              "hover:scale-105"
-            ]}
-          >
-            <div class={[
-              "size-12 flex items-center justify-center",
-              if(MapSet.member?(@selected_sources, source.source_type),
-                do: "text-success",
-                else: "text-base-content/70"
-              )
-            ]}>
-              <SourcesComponents.source_type_icon source_type={source.source_type} />
-            </div>
-            <span class={[
-              "text-sm font-medium",
-              if(MapSet.member?(@selected_sources, source.source_type),
-                do: "text-success",
-                else: "text-base-content"
-              )
-            ]}>
-              {source.name}
-            </span>
-          </button>
+          <%= for source <- @data_sources do %>
+            <% coming_soon = source.source_type in ~w(sharepoint confluence jira github gitlab) %>
+            <button
+              type="button"
+              phx-click={unless(coming_soon, do: "toggle_source")}
+              phx-value-source-type={source.source_type}
+              disabled={coming_soon}
+              class={[
+                "flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 transition-all duration-200",
+                cond do
+                  coming_soon ->
+                    "border-base-300 opacity-50 cursor-not-allowed"
+
+                  MapSet.member?(@selected_sources, source.source_type) ->
+                    "bg-success/15 border-success shadow-md"
+
+                  true ->
+                    "bg-base-100 border-base-300 hover:border-base-content/30 cursor-pointer hover:scale-105"
+                end
+              ]}
+            >
+              <div class={[
+                "size-12 flex items-center justify-center",
+                if(MapSet.member?(@selected_sources, source.source_type),
+                  do: "text-success",
+                  else: "text-base-content/70"
+                )
+              ]}>
+                <SourcesComponents.source_type_icon source_type={source.source_type} />
+              </div>
+              <span class={[
+                "text-sm font-medium",
+                if(MapSet.member?(@selected_sources, source.source_type),
+                  do: "text-success",
+                  else: "text-base-content"
+                )
+              ]}>
+                {source.name}
+              </span>
+              <span :if={coming_soon} class="badge badge-xs badge-ghost">Coming Soon</span>
+            </button>
+          <% end %>
         </div>
 
         <div class="flex gap-3 mt-8">
@@ -168,7 +774,7 @@ defmodule LiteskillWeb.SetupLive do
 
   defp configure_source_step(assigns) do
     ~H"""
-    <div class="card bg-base-100 shadow-xl w-full max-w-lg">
+    <div class="card bg-base-100 shadow-xl w-full max-w-lg mx-auto">
       <div class="card-body">
         <div class="flex items-center justify-between">
           <h2 class="card-title text-2xl">Configure {@source.name}</h2>
@@ -220,6 +826,37 @@ defmodule LiteskillWeb.SetupLive do
     """
   end
 
+  defp config_fields_for(source) do
+    DataSources.config_fields_for(source.source_type)
+  end
+
+  # --- Navigation ---
+
+  defp advance_step(socket) do
+    steps = socket.assigns.steps
+    current = socket.assigns.step
+    current_idx = Enum.find_index(steps, &(&1 == current)) || 0
+
+    case Enum.at(steps, current_idx + 1) do
+      nil ->
+        if socket.assigns.mode == :single_user, do: Settings.dismiss_setup()
+        finish_url = if socket.assigns.mode == :single_user, do: "/", else: "/login"
+        assign(socket, step: current) |> redirect(to: finish_url)
+
+      next_step ->
+        assign(socket, step: next_step, error: nil)
+    end
+  end
+
+  # --- Event handlers: Welcome ---
+
+  @impl true
+  def handle_event("welcome_continue", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  # --- Event handlers: Password (server mode) ---
+
   @impl true
   def handle_event("setup", %{"setup" => params}, socket) do
     password = params["password"]
@@ -237,13 +874,183 @@ defmodule LiteskillWeb.SetupLive do
           {:ok, user} ->
             {:noreply,
              socket
-             |> assign(step: :data_sources, current_user: user, error: nil)}
+             |> assign(current_user: user, error: nil)
+             |> advance_step()}
 
           {:error, _changeset} ->
             {:noreply, assign(socket, error: "Failed to set password. Please try again.")}
         end
     end
   end
+
+  # --- Event handlers: Permissions ---
+
+  @impl true
+  def handle_event("toggle_permission", %{"permission" => permission}, socket) do
+    selected = socket.assigns.selected_permissions
+
+    selected =
+      if MapSet.member?(selected, permission),
+        do: MapSet.delete(selected, permission),
+        else: MapSet.put(selected, permission)
+
+    {:noreply, assign(socket, selected_permissions: selected)}
+  end
+
+  @impl true
+  def handle_event("save_permissions", _params, socket) do
+    permissions = MapSet.to_list(socket.assigns.selected_permissions)
+    role = Rbac.get_role_by_name!("Default")
+
+    case Rbac.update_role(role, %{permissions: permissions}) do
+      {:ok, _} ->
+        {:noreply, advance_step(socket)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, error: action_error("update permissions", reason))}
+    end
+  end
+
+  @impl true
+  def handle_event("skip_permissions", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  # --- Event handlers: OpenRouter OAuth ---
+
+  @impl true
+  def handle_event("openrouter_connect", _params, socket) do
+    if SingleUser.enabled?() do
+      user = socket.assigns.current_user
+      {verifier, challenge} = OpenRouter.generate_pkce()
+      callback_url = LiteskillWeb.Endpoint.url() <> ~p"/auth/openrouter/callback"
+
+      state = OpenRouter.StateStore.store(verifier, user.id, "/setup")
+      auth_url = OpenRouter.auth_url(callback_url <> "?state=#{state}", challenge)
+
+      Phoenix.PubSub.subscribe(Liteskill.PubSub, OpenRouterController.openrouter_topic(user.id))
+
+      {:noreply,
+       socket
+       |> assign(openrouter_pending: true)
+       |> push_event("open_external_url", %{url: auth_url})}
+    else
+      {:noreply, redirect(socket, to: ~p"/auth/openrouter?return_to=/setup")}
+    end
+  end
+
+  # --- Event handlers: Providers ---
+
+  @impl true
+  def handle_event("setup_providers_show_custom", _params, socket) do
+    {:noreply, assign(socket, provider_view: :custom)}
+  end
+
+  @impl true
+  def handle_event("setup_providers_show_presets", _params, socket) do
+    {:noreply, assign(socket, provider_view: :presets)}
+  end
+
+  @impl true
+  def handle_event("setup_create_provider", %{"llm_provider" => params}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    case AdminLive.build_provider_attrs(params, user_id) do
+      {:ok, attrs} ->
+        case LlmProviders.create_provider(attrs) do
+          {:ok, _provider} ->
+            providers = LlmProviders.list_all_providers()
+
+            {:noreply,
+             assign(socket,
+               llm_providers: providers,
+               llm_provider_form: to_form(%{}, as: :llm_provider),
+               error: nil
+             )}
+
+          {:error, changeset} ->
+            {:noreply, assign(socket, error: action_error("create provider", changeset))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, error: msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("setup_providers_continue", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  @impl true
+  def handle_event("setup_providers_skip", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  # --- Event handlers: Models ---
+
+  @impl true
+  def handle_event("setup_create_model", %{"llm_model" => params}, socket) do
+    user_id = socket.assigns.current_user.id
+
+    case AdminLive.build_model_attrs(params, user_id) do
+      {:ok, attrs} ->
+        case LlmModels.create_model(attrs) do
+          {:ok, _model} ->
+            models = LlmModels.list_all_models()
+            embedding_models = LlmModels.list_all_active_models(model_type: "embedding")
+
+            {:noreply,
+             assign(socket,
+               llm_models: models,
+               rag_embedding_models: embedding_models,
+               llm_model_form: to_form(%{}, as: :llm_model),
+               error: nil
+             )}
+
+          {:error, changeset} ->
+            {:noreply, assign(socket, error: action_error("create model", changeset))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, error: msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("setup_models_continue", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  @impl true
+  def handle_event("setup_models_skip", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  # --- Event handlers: RAG ---
+
+  @impl true
+  def handle_event("setup_select_embedding", %{"model_id" => model_id}, socket) do
+    model_id = if model_id == "", do: nil, else: model_id
+
+    case Settings.update_embedding_model(model_id) do
+      {:ok, settings} ->
+        {:noreply,
+         socket
+         |> assign(rag_current_model: settings.embedding_model, error: nil)
+         |> advance_step()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, error: action_error("update embedding model", reason))}
+    end
+  end
+
+  @impl true
+  def handle_event("setup_rag_skip", _params, socket) do
+    {:noreply, advance_step(socket)}
+  end
+
+  # --- Event handlers: Data sources ---
 
   @impl true
   def handle_event("toggle_source", %{"source-type" => source_type}, socket) do
@@ -269,7 +1076,7 @@ defmodule LiteskillWeb.SetupLive do
       Enum.filter(data_sources, fn source -> MapSet.member?(selected, source.source_type) end)
 
     if sources_to_configure == [] do
-      {:noreply, redirect(socket, to: "/login")}
+      {:noreply, advance_step(socket)}
     else
       {created_sources, error} =
         Enum.reduce_while(sources_to_configure, {[], nil}, fn source, {acc, _} ->
@@ -280,8 +1087,8 @@ defmodule LiteskillWeb.SetupLive do
             {:ok, db_source} ->
               {:cont, {[Map.put(source, :db_id, db_source.id) | acc], nil}}
 
-            {:error, _} ->
-              {:halt, {acc, "Failed to create source: #{source.name}"}}
+            {:error, reason} ->
+              {:halt, {acc, action_error("create source #{source.name}", reason)}}
           end
         end)
 
@@ -292,6 +1099,7 @@ defmodule LiteskillWeb.SetupLive do
          socket
          |> assign(
            step: :configure_source,
+           steps: socket.assigns.steps ++ [:configure_source],
            sources_to_configure: Enum.reverse(created_sources),
            current_config_index: 0,
            config_form: to_form(%{}, as: :config)
@@ -329,14 +1137,27 @@ defmodule LiteskillWeb.SetupLive do
 
   @impl true
   def handle_event("skip_sources", _params, socket) do
-    {:noreply, redirect(socket, to: "/login")}
+    {:noreply, advance_step(socket)}
+  end
+
+  # --- PubSub: OpenRouter connected (desktop mode) ---
+
+  @impl true
+  def handle_info(:openrouter_connected, socket) do
+    {:noreply,
+     assign(socket,
+       openrouter_pending: false,
+       llm_providers: LlmProviders.list_all_providers()
+     )}
   end
 
   defp advance_config(socket) do
     next_index = socket.assigns.current_config_index + 1
 
     if next_index >= length(socket.assigns.sources_to_configure) do
-      {:noreply, redirect(socket, to: "/login")}
+      if socket.assigns.mode == :single_user, do: Settings.dismiss_setup()
+      finish_url = if socket.assigns.mode == :single_user, do: "/", else: "/login"
+      {:noreply, redirect(socket, to: finish_url)}
     else
       {:noreply,
        socket

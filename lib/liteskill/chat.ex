@@ -1,4 +1,25 @@
 defmodule Liteskill.Chat do
+  use Boundary,
+    top_level?: true,
+    deps: [
+      Liteskill.Aggregate,
+      Liteskill.Authorization,
+      Liteskill.EventStore,
+      Liteskill.Rbac,
+      Liteskill.LlmModels
+    ],
+    exports: [
+      Conversation,
+      ConversationAggregate,
+      Events,
+      Message,
+      MessageBuilder,
+      MessageChunk,
+      Projector,
+      StreamRecovery,
+      ToolCall
+    ]
+
   @moduledoc """
   The Chat context. Provides write and read APIs for conversations.
 
@@ -8,7 +29,7 @@ defmodule Liteskill.Chat do
 
   alias Liteskill.Aggregate.Loader
   alias Liteskill.Authorization
-  alias Liteskill.Chat.{Conversation, ConversationAggregate, Message, Projector}
+  alias Liteskill.Chat.{Conversation, ConversationAggregate, Message, MessageChunk, Projector}
   alias Liteskill.EventStore.Postgres, as: Store
   alias Liteskill.Repo
 
@@ -17,25 +38,28 @@ defmodule Liteskill.Chat do
   # --- Write API ---
 
   def create_conversation(params) do
-    conversation_id = params[:conversation_id] || Ecto.UUID.generate()
-    stream_id = "conversation-#{conversation_id}"
+    with :ok <-
+           Liteskill.Rbac.authorize(params[:user_id] || params.user_id, "conversations:create") do
+      conversation_id = params[:conversation_id] || Ecto.UUID.generate()
+      stream_id = "conversation-#{conversation_id}"
 
-    {model_id, llm_model_id} =
-      case params[:llm_model_id] do
-        nil ->
-          {params[:model_id], nil}
+      {model_id, llm_model_id} =
+        case params[:llm_model_id] do
+          nil ->
+            {params[:model_id], nil}
 
-        llm_model_id ->
-          case Liteskill.LlmModels.get_model(llm_model_id, params.user_id) do
-            {:ok, %{model_id: mid}} -> {mid, llm_model_id}
-            {:error, _} -> {params[:model_id], nil}
-          end
+          llm_model_id ->
+            case Liteskill.LlmModels.get_model(llm_model_id, params.user_id) do
+              {:ok, %{model_id: mid}} -> {mid, llm_model_id}
+              {:error, _} -> {params[:model_id], nil}
+            end
+        end
+
+      if params[:llm_model_id] && is_nil(model_id) do
+        {:error, :no_model_configured}
+      else
+        do_create_conversation(conversation_id, stream_id, params, model_id, llm_model_id)
       end
-
-    if params[:llm_model_id] && is_nil(model_id) do
-      {:error, :no_model_configured}
-    else
-      do_create_conversation(conversation_id, stream_id, params, model_id, llm_model_id)
     end
   end
 
@@ -277,6 +301,17 @@ defmodule Liteskill.Chat do
           msg |> Message.changeset(%{rag_sources: rag_sources}) |> Repo.update()
         end
     end
+  end
+
+  @doc """
+  Deletes all message chunks for a given message.
+
+  Called internally by StreamHandler to clean up orphaned chunks before
+  retrying a failed stream.
+  """
+  def delete_message_chunks(message_id) do
+    from(c in MessageChunk, where: c.message_id == ^message_id)
+    |> Repo.delete_all()
   end
 
   def get_conversation_tree(conversation_id, user_id) do

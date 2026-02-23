@@ -1,4 +1,10 @@
 defmodule Liteskill.BuiltinTools do
+  use Boundary,
+    top_level?: true,
+    check: [out: false],
+    deps: [],
+    exports: [Reports, Wiki, AgentStudio, DeepResearch]
+
   @moduledoc """
   Behaviour and registry for built-in tool suites.
 
@@ -13,7 +19,13 @@ defmodule Liteskill.BuiltinTools do
   @callback call_tool(tool_name :: String.t(), input :: map(), context :: keyword()) ::
               {:ok, map()} | {:error, term()}
 
-  @registry [Liteskill.BuiltinTools.Reports, Liteskill.BuiltinTools.VisualResponse]
+  @registry [
+    Liteskill.BuiltinTools.Reports,
+    Liteskill.BuiltinTools.Wiki,
+    Liteskill.BuiltinTools.AgentStudio,
+    Liteskill.BuiltinTools.DeepResearch,
+    Liteskill.BuiltinTools.VisualResponse
+  ]
 
   def all, do: @registry
 

@@ -162,26 +162,27 @@ defmodule LiteskillWeb.ReportComponents do
   attr :report, :map, required: true
   attr :owned, :boolean, required: true
 
-  def report_card(assigns) do
+  def report_row(assigns) do
+    assigns = assign(assigns, :creator, creator_label(assigns.report))
+
     ~H"""
-    <div class="relative group">
+    <div class="flex items-center gap-3 px-4 py-3 hover:bg-base-200/50 transition-colors group border-b border-base-200 last:border-b-0">
+      <.icon name="hero-document-text-micro" class="size-4 text-base-content/40 flex-shrink-0" />
       <.link
         navigate={~p"/reports/#{@report.id}"}
-        class="block card bg-base-100 border border-base-300 shadow-sm hover:border-primary/40 transition-colors cursor-pointer"
+        class="flex-1 min-w-0 truncate text-sm font-medium hover:text-primary transition-colors"
       >
-        <div class="card-body p-4">
-          <div class="flex items-start justify-between gap-2">
-            <div class="flex-1 min-w-0">
-              <h3 class="font-semibold text-sm truncate">{@report.title}</h3>
-              <p class="text-xs text-base-content/60 mt-0.5">
-                {Calendar.strftime(@report.inserted_at, "%b %d, %Y")}
-              </p>
-            </div>
-            <span :if={!@owned} class="badge badge-sm badge-info">shared</span>
-          </div>
-        </div>
+        {@report.title}
       </.link>
-      <div class="absolute bottom-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+      <span class="text-xs text-base-content/50 flex-shrink-0 flex items-center gap-1">
+        <.icon name={creator_icon(@report)} class="size-3" />
+        {@creator}
+      </span>
+      <span :if={!@owned} class="badge badge-sm badge-info flex-shrink-0">shared</span>
+      <span class="text-xs text-base-content/50 flex-shrink-0">
+        {Calendar.strftime(@report.updated_at, "%b %d, %Y")}
+      </span>
+      <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
         <button
           phx-click="open_sharing"
           phx-value-entity-type="report"
@@ -213,6 +214,33 @@ defmodule LiteskillWeb.ReportComponents do
     """
   end
 
+  attr :page, :integer, required: true
+  attr :total_pages, :integer, required: true
+
+  def reports_pagination(assigns) do
+    ~H"""
+    <div :if={@total_pages > 1} class="flex items-center justify-center gap-2 py-3">
+      <.link
+        :if={@page > 1}
+        patch={~p"/reports?#{%{page: @page - 1}}"}
+        class="btn btn-ghost btn-sm"
+      >
+        <.icon name="hero-chevron-left-micro" class="size-4" /> Prev
+      </.link>
+      <span class="text-sm text-base-content/60">
+        Page {@page} of {@total_pages}
+      </span>
+      <.link
+        :if={@page < @total_pages}
+        patch={~p"/reports?#{%{page: @page + 1}}"}
+        class="btn btn-ghost btn-sm"
+      >
+        Next <.icon name="hero-chevron-right-micro" class="size-4" />
+      </.link>
+    </div>
+    """
+  end
+
   # --- Helpers ---
 
   defp heading_tag(1), do: "h1"
@@ -224,4 +252,12 @@ defmodule LiteskillWeb.ReportComponents do
   defp heading_class(2), do: "text-lg"
   defp heading_class(3), do: "text-base"
   defp heading_class(_), do: "text-sm"
+
+  defp creator_label(%{run: %{team_definition: %{name: name}}}) when is_binary(name), do: name
+  defp creator_label(%{run: %{id: id}}) when not is_nil(id), do: "Agent Run"
+  defp creator_label(%{user: %{name: name}}) when is_binary(name), do: name
+  defp creator_label(_), do: "Unknown"
+
+  defp creator_icon(%{run: %{id: id}}) when not is_nil(id), do: "hero-cpu-chip-micro"
+  defp creator_icon(_), do: "hero-user-micro"
 end

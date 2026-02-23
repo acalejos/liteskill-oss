@@ -54,6 +54,35 @@ defmodule Liteskill.BuiltinTools.ReportsTest do
       assert report_id in ids
     end
 
+    test "create with run_id in context", %{user: user} do
+      {:ok, run} =
+        Liteskill.Runs.create_run(%{
+          name: "Tool Run #{System.unique_integer([:positive])}",
+          prompt: "Test",
+          user_id: user.id
+        })
+
+      ctx = [user_id: user.id, run_id: run.id]
+
+      assert {:ok, result} =
+               ReportsTool.call_tool("reports__create", %{"title" => "Run Report"}, ctx)
+
+      data = decode_content(result)
+      report = Liteskill.Repo.get!(Liteskill.Reports.Report, data["id"])
+      assert report.run_id == run.id
+    end
+
+    test "create without run_id in context leaves run_id nil", %{user: user} do
+      ctx = [user_id: user.id]
+
+      assert {:ok, result} =
+               ReportsTool.call_tool("reports__create", %{"title" => "User Report"}, ctx)
+
+      data = decode_content(result)
+      report = Liteskill.Repo.get!(Liteskill.Reports.Report, data["id"])
+      assert report.run_id == nil
+    end
+
     test "modify_sections upsert and get flow", %{user: user} do
       ctx = [user_id: user.id]
 

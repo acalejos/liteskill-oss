@@ -1,10 +1,47 @@
 defmodule Liteskill.Rag do
+  use Boundary,
+    top_level?: true,
+    deps: [
+      Liteskill.Authorization,
+      Liteskill.DataSources,
+      Liteskill.LlmModels,
+      Liteskill.LlmProviders,
+      Liteskill.Settings
+    ],
+    exports: [
+      Collection,
+      Source,
+      Document,
+      Chunk,
+      Chunker,
+      CohereClient,
+      DocumentSyncWorker,
+      EmbedQueue,
+      EmbeddingClient,
+      EmbeddingRequest,
+      IngestWorker,
+      OpenAIEmbeddingClient,
+      Pipeline,
+      ReembedWorker,
+      WikiSyncWorker
+    ]
+
   @moduledoc """
   The RAG context. Manages collections, sources, documents, chunks,
   embedding generation, and semantic search.
   """
 
-  alias Liteskill.Rag.{Collection, Source, Document, Chunk, CohereClient, IngestWorker}
+  alias Liteskill.Rag.{
+    Collection,
+    Source,
+    Document,
+    Chunk,
+    CohereClient,
+    EmbeddingClient,
+    EmbedQueue,
+    IngestWorker
+  }
+
   alias Liteskill.Repo
 
   import Ecto.Query
@@ -194,7 +231,7 @@ defmodule Liteskill.Rag do
       dimensions = Keyword.get(opts, :dimensions, collection.embedding_dimensions)
       texts = Enum.map(chunks, & &1.content)
 
-      case CohereClient.embed(
+      case EmbedQueue.embed(
              texts,
              [{:input_type, "search_document"}, {:dimensions, dimensions}, {:user_id, user_id}] ++
                plug_opts
@@ -224,13 +261,17 @@ defmodule Liteskill.Rag do
             Repo.insert_all(Chunk, chunk_rows)
 
             document
-            |> Document.changeset(%{status: "embedded", chunk_count: length(chunks)})
+            |> Document.changeset(%{
+              status: "embedded",
+              chunk_count: length(chunks),
+              error_message: nil
+            })
             |> Repo.update!()
           end)
 
         {:error, reason} ->
           document
-          |> Document.changeset(%{status: "error"})
+          |> Document.changeset(%{status: "error", error_message: format_embed_error(reason)})
           |> Repo.update()
 
           {:error, reason}
@@ -246,7 +287,7 @@ defmodule Liteskill.Rag do
       dimensions = Keyword.get(opts, :dimensions, collection.embedding_dimensions)
       limit = Keyword.get(opts, :limit, 20)
 
-      case CohereClient.embed(
+      case EmbeddingClient.embed(
              [query],
              [{:input_type, "search_query"}, {:dimensions, dimensions}, {:user_id, user_id}] ++
                plug_opts
@@ -320,7 +361,7 @@ defmodule Liteskill.Rag do
         search_limit = Keyword.get(rest, :search_limit, 50)
         top_n = Keyword.get(rest, :top_n, 10)
 
-        case CohereClient.embed(
+        case EmbeddingClient.embed(
                [query],
                [{:input_type, "search_query"}, {:dimensions, dimensions}, {:user_id, user_id}] ++
                  plug_opts
@@ -353,9 +394,9 @@ defmodule Liteskill.Rag do
   def augment_context(query, user_id, opts \\ []) do
     {plug_opts, _rest} = Keyword.split(opts, [:plug])
 
-    case CohereClient.embed(
+    case EmbeddingClient.embed(
            [query],
-           [{:input_type, "search_query"}, {:dimensions, 1024}, {:user_id, user_id}] ++ plug_opts
+           [{:input_type, "search_query"}, {:user_id, user_id}] ++ plug_opts
          ) do
       {:ok, [query_embedding]} ->
         results = vector_search_all(user_id, query_embedding, 100)
@@ -387,6 +428,47 @@ defmodule Liteskill.Rag do
   defp add_nil_scores(results) do
     Enum.map(results, fn r -> Map.put(r, :relevance_score, nil) end)
   end
+
+  @doc """
+  Searches RAG collections linked to the given data source IDs.
+  Used by agent execution to inject relevant context from ACL'd datasources.
+  Returns `{:ok, results}` where results are `%{chunk: chunk, distance: float}` maps.
+  """
+  # coveralls-ignore-start
+  def augment_context_for_agent(query, source_ids, user_id, opts \\ []) do
+    collections = find_collections_for_sources(source_ids, user_id)
+
+    if collections == [] do
+      {:ok, []}
+    else
+      {plug_opts, _rest} = Keyword.split(opts, [:plug])
+
+      results =
+        Enum.flat_map(collections, fn coll ->
+          case search(coll.id, query, user_id, [{:limit, 20}] ++ plug_opts) do
+            {:ok, chunks} -> chunks
+            _ -> []
+          end
+        end)
+
+      {:ok, results |> Enum.sort_by(& &1.distance) |> Enum.take(20)}
+    end
+  end
+
+  defp find_collections_for_sources(source_ids, user_id) do
+    sources =
+      Liteskill.DataSources.Source
+      |> where([s], s.id in ^source_ids)
+      |> Repo.all()
+
+    source_names = Enum.map(sources, & &1.name)
+
+    Collection
+    |> where([c], c.user_id == ^user_id and c.name in ^source_names)
+    |> Repo.all()
+  end
+
+  # coveralls-ignore-stop
 
   # --- Wiki Sync Helpers ---
 
@@ -470,11 +552,28 @@ defmodule Liteskill.Rag do
     end
   end
 
-  def list_chunks_for_document(rag_document_id) do
-    Chunk
-    |> where([c], c.document_id == ^rag_document_id)
-    |> order_by([c], asc: c.position)
-    |> Repo.all()
+  def list_chunks_for_document(rag_document_id, user_id) do
+    wiki_space_ids = Liteskill.Authorization.accessible_entity_ids("wiki_space", user_id)
+
+    case Repo.one(
+           from(d in Document,
+             where:
+               d.id == ^rag_document_id and
+                 (d.user_id == ^user_id or
+                    fragment("(?->>'wiki_space_id')::uuid", d.metadata) in subquery(
+                      wiki_space_ids
+                    ))
+           )
+         ) do
+      %Document{} ->
+        Chunk
+        |> where([c], c.document_id == ^rag_document_id)
+        |> order_by([c], asc: c.position)
+        |> Repo.all()
+
+      nil ->
+        []
+    end
   end
 
   def delete_document_chunks(document_id) do
@@ -671,4 +770,67 @@ defmodule Liteskill.Rag do
   end
 
   defp maybe_hash_content(attrs), do: attrs
+
+  @doc """
+  Returns the number of documents in a collection (across all its sources).
+  """
+  def collection_document_count(collection_id) do
+    from(d in Document,
+      join: s in Source,
+      on: s.id == d.source_id,
+      where: s.collection_id == ^collection_id,
+      select: count(d.id)
+    )
+    |> Repo.one()
+  end
+
+  # --- Re-embedding support ---
+
+  @doc """
+  Returns the total number of chunks across all collections.
+  """
+  def total_chunk_count do
+    Repo.aggregate(Chunk, :count, :id)
+  end
+
+  @doc """
+  Clears all embeddings from all chunks and resets embedded documents to pending.
+  Returns `{:ok, %{chunks_cleared: n, documents_reset: n}}`.
+  """
+  def clear_all_embeddings do
+    {chunks_cleared, _} =
+      from(c in Chunk, where: not is_nil(c.embedding))
+      |> Repo.update_all(set: [embedding: nil])
+
+    {documents_reset, _} =
+      from(d in Document, where: d.status == "embedded")
+      |> Repo.update_all(set: [status: "pending"])
+
+    {:ok, %{chunks_cleared: chunks_cleared, documents_reset: documents_reset}}
+  end
+
+  @doc """
+  Returns documents that need re-embedding (pending status with chunks), paginated.
+  """
+  def list_documents_for_reembedding(limit, offset) do
+    from(d in Document,
+      where: d.status == "pending" and d.chunk_count > 0,
+      order_by: [asc: d.inserted_at],
+      limit: ^limit,
+      offset: ^offset
+    )
+    |> Repo.all()
+  end
+
+  # coveralls-ignore-start
+  defp format_embed_error(%{status: status, body: %{"Message" => msg}}),
+    do: "HTTP #{status}: #{msg}"
+
+  defp format_embed_error(%{status: status, body: %{"message" => msg}}),
+    do: "HTTP #{status}: #{msg}"
+
+  defp format_embed_error(%{status: status}), do: "HTTP #{status}"
+  defp format_embed_error(reason) when is_binary(reason), do: reason
+  defp format_embed_error(reason), do: inspect(reason)
+  # coveralls-ignore-stop
 end

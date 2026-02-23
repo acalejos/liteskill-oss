@@ -66,6 +66,9 @@ config :ueberauth, Ueberauth,
     oidc: {Ueberauth.Strategy.OIDCC, []}
   ]
 
+# Single-user mode (desktop / self-hosted). Set SINGLE_USER_MODE=true to enable.
+config :liteskill, :single_user_mode, false
+
 # Configure LLM defaults (region/token used by CohereClient for RAG embeddings)
 config :liteskill, Liteskill.LLM, bedrock_region: "us-east-1"
 
@@ -79,7 +82,19 @@ config :phoenix, :json_library, Jason
 
 config :liteskill, Oban,
   repo: Liteskill.Repo,
-  queues: [default: 10, rag_ingest: 5, data_sync: 3]
+  queues: [default: 10, rag_ingest: 5, data_sync: 3, agent_runs: 3]
+
+# Tauri desktop shell configuration
+config :ex_tauri,
+  version: "2.5.1",
+  app_name: "Liteskill",
+  host: "localhost",
+  port: 4000,
+  window_title: "Liteskill",
+  width: 1280,
+  height: 900,
+  resize: true,
+  fullscreen: false
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
