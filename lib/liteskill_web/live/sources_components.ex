@@ -221,9 +221,7 @@ defmodule LiteskillWeb.SourcesComponents do
         </div>
         <div class="flex-1 overflow-y-auto p-4">
           <div class="prose prose-sm max-w-none">
-            <pre
-              class="max-h-[65vh] overflow-auto"
-            ><code id={"raw-output-text-#{@message_id || "current"}"}>{@raw_output}</code></pre>
+            <pre class="max-h-[65vh] overflow-auto"><code id={"raw-output-text-#{@message_id || "current"}"}>{@raw_output}</code></pre>
           </div>
         </div>
       </div>
